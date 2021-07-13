@@ -6,3 +6,7 @@
 /data/processed
 /data/raw
 .Rproj.user
+
+
+# Other
+.DS_Store
