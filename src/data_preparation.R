@@ -26,7 +26,7 @@ publ_ft <- dat_xl$publications %>%
   
   # clean up df
   rename(id = PMID) %>% 
-  select(-c("CHECK WITH EXP", starts_with("..."))) %>% 
+  dplyr::select(-c("CHECK WITH EXP", starts_with("..."))) %>% 
   
   # summary outcomes to lower
   mutate(
@@ -48,8 +48,9 @@ exp_ft <- dat_xl$experiments %>%
   filter(id %in% publ_ft$id) %>% 
   
   # keep relevant vars
-  select(c("id", "exp_id", "species", "strain", "origin", "model",
-           "sex", "housing_after_weaning", "other_life_experience"))
+  dplyr::select(id, exp_id, species, strain, origin, model, sex, 
+         housing_after_weaning, other_life_experience)
+  
 
 
 
@@ -58,7 +59,7 @@ structural_ft <- dat_xl$out_structural %>%
   
   # get publ id
   left_join(exp_ft, by = "exp_id") %>%
-  left_join(publ_ft %>% select(id, link, authors, year), by = "id") %>%
+  left_join(publ_ft %>% dplyr::select(id, link, authors, year), by = "id") %>%
   
   # get citation
   mutate(
@@ -179,8 +180,8 @@ structural_ft <- dat_xl$out_structural %>%
   ) %>%
     
   # select vars of interest
-  select(cite, link, id, exp_id, outcome_id, 
-         age_testing_weeks,
+  dplyr::select(cite, link, id, exp_id, outcome_id, 
+         sex, age_testing_weeks,
          outcome, out_grouped, product_measured, technique, outcome_unit, 
          days_after_induction,
          brain_area_publication, ba_grouped, brain_area_hemisphere,
@@ -189,7 +190,7 @@ structural_ft <- dat_xl$out_structural %>%
          )
 
 ## check that there are no NAs in the summ stats --> must be 0
-structural_ft %>% select(c(ends_with("_c"), ends_with("_e"))) %>% is.na() %>% sum()
+structural_ft %>% dplyr::select(c(ends_with("_c"), ends_with("_e"))) %>% is.na() %>% sum()
 
 ## check all deviations are positive
 sum(structural_ft$sd_c <= 0)
@@ -199,3 +200,45 @@ sum(structural_ft$sd_e <= 0)
 # Save temp data ----------------------------------------------------------
 
 saveRDS(structural_ft, paste0(temp, "struct_temp.RDS"))
+
+
+
+# Hippocampus -------------------------------------------------------------
+# within hippocampus
+hippocampus <- structural_ft %>% 
+  filter(ba_grouped == "hippocampus") %>% 
+  
+  # rename brain areas
+  mutate(
+    ba_main = case_when(
+      str_detect(brain_area_publication, "dentate|GZ") ~ "dentate_gyrus", 
+      str_detect(brain_area_publication, "CA1") ~ "CA1", 
+      str_detect(brain_area_publication, "CA3") ~ "CA3", 
+      str_detect(brain_area_publication, "hippocamp") ~ "hippocampus_total", 
+      T ~ brain_area_publication
+    ),
+    ba_location = case_when(
+      str_detect(brain_area_publication, "dorsal") ~ "dorsal", 
+      str_detect(brain_area_publication, "ventral") ~ "ventral", 
+      str_detect(brain_area_publication, "basal") ~ "basal", 
+      str_detect(brain_area_publication, "caudal") ~ "caudal", 
+      str_detect(brain_area_publication, "apical") ~ "apical", 
+      str_detect(brain_area_publication, "rostral") ~ "rostral", 
+      T ~ "not_specified"
+    ), 
+    ba_layer = case_when(
+      str_detect(brain_area_publication, "subgranular") ~ "subgranular", 
+      str_detect(brain_area_publication, "suprapyr") ~ "suprapyramidal", 
+      str_detect(brain_area_publication, "infrapyr") ~ "infrapyramidal",
+      str_detect(brain_area_publication, "granular|GZ") ~ "granular", 
+      str_detect(brain_area_publication, "pyramyd") ~ "pyramydal", 
+      str_detect(brain_area_publication, "hilus") ~ "hilus", 
+      
+      str_detect(brain_area_publication, "stratum|layer|blade|connecting") ~ "other_stratum_layer_blade", 
+      T ~ "not_specified" # make sure you first re-double check them!
+    )
+  )
+
+## save data hippocampus
+saveRDS(hippocampus, paste0(final, "hippocampus.RDS"))
+
