@@ -121,9 +121,11 @@ contr_hit <- rbind(
 anova(brdu_mod, L = contr_hit) 
 size_hit_res <- summary(glht(brdu_mod, linfct = contr_hit, df=df.residual(brdu_mod)), test=adjusted('holm'))
 
+
+## eyeball possible moderators
 forest(brdu_mod)
 forest(brdu_mod, slab = brdu_final$unique_id)
 
 brdu_final %>% 
-  filter(unique_id %in% c("brdu_1", "brdu_5", "brdu_7", "brdu_9")) -> x
+  filter(unique_id %in% c("brdu_1", "brdu_5", "brdu_7", "brdu_9"))
   
