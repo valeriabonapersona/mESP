@@ -49,9 +49,14 @@ exp_ft <- dat_xl$experiments %>%
   
   # keep relevant vars
   dplyr::select(id, exp_id, species, strain, origin, model, sex, 
-         housing_after_weaning, other_life_experience)
+         housing_after_weaning, other_life_experience) %>% 
   
-
+  # clean_up vars
+  mutate(
+    housing_after_weaning = ifelse(is.na(housing_after_weaning), "not_specified", housing_after_weaning)
+  )
+  
+# exlude balbc?
 
 
 # Structural plasticity ---------------------------------------------------
@@ -73,6 +78,8 @@ structural_ft <- dat_xl$out_structural %>%
   
   # categorize outcomes
   mutate(
+    brain_area_hemisphere = ifelse(is.na(brain_area_hemisphere), 
+                                   "not_specified", brain_area_hemisphere),
     out_grouped = case_when(
       str_detect(outcome, "spine") ~ "spines",
       str_detect(outcome, "volume|width") ~ "size",
@@ -105,7 +112,7 @@ structural_ft <- dat_xl$out_structural %>%
       
     ), 
     
-    major_stress_events = case_when(
+    major_chronic_stress = case_when(
       str_detect(housing_after_weaning, "single") ~ "yes",
       is.na(other_life_experience) ~ "no", 
       str_detect(other_life_experience, "7day footshock") ~ "yes",
@@ -117,7 +124,7 @@ structural_ft <- dat_xl$out_structural %>%
       
     ), 
     
-    acute_condition = case_when(
+    acute_stress = case_when(
       str_detect(acute_experience_description, "rest") ~ "rest",
       str_detect(acute_experience_description, "footshock|restraint|odor") ~ "stressed",
       str_detect(acute_experience_description, "EPM|injection|fasting") ~ "aroused",
@@ -180,13 +187,14 @@ structural_ft <- dat_xl$out_structural %>%
   ) %>%
     
   # select vars of interest
-  dplyr::select(cite, link, id, exp_id, outcome_id, 
-         sex, age_testing_weeks,
-         outcome, out_grouped, product_measured, technique, outcome_unit, 
-         days_after_induction,
-         brain_area_publication, ba_grouped, brain_area_hemisphere,
-         n_c, n_e, mean_c, mean_e, sd_c, sd_e, sys_review_significance, 
-         behavior, major_stress_events, acute_condition
+  dplyr::select(
+    cite, link, id, exp_id, outcome_id, 
+    sex, age_testing_weeks, model, origin, housing_after_weaning,   
+    behavior, major_chronic_stress, acute_stress,
+    outcome, out_grouped, product_measured, technique, outcome_unit, 
+    days_after_induction,
+    brain_area_publication, ba_grouped, brain_area_hemisphere,
+    n_c, n_e, mean_c, mean_e, sd_c, sd_e, sys_review_significance 
          )
 
 ## check that there are no NAs in the summ stats --> must be 0
