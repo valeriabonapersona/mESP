@@ -16,7 +16,8 @@ rm(list = ls())
 list_cran_packages <- c(
   "tidyverse", # data handling
   "remotes", # download from github
-  
+  "metafor", # for meta-analyses
+ # "multcomp", # screws dplyr::select
   "readxl", # to read xl files
   "viridis" # for colours
 )
