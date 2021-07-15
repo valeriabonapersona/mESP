@@ -6,7 +6,7 @@ Volume
 source("config/utilities.R")
 source("src/general_funs.R")
 
-hippocampus <- readRDS(paste0(final, "hippocampus.RDS"))
+hippocampus <- readRDS(paste0(temp, "hippocampus.RDS"))
 
 # Size --------------------------------------------------------------------
 size <- hippocampus %>% 
@@ -16,10 +16,6 @@ size <- hippocampus %>%
     sex == "male",
     out_grouped == "size")
 
-life_vars <- c("cite", "link", "id", "exp_id", 
-               "sex", "age_testing_weeks", "model", "origin", 
-               "housing_after_weaning", "behavior", "major_chronic_stress", 
-               "acute_stress")
 
 '
   Main analysis
@@ -53,8 +49,9 @@ size_final <- size %>%
   )  %>% 
   
   # sum the volumes per experiment
-  group_by_at(vars(one_of(life_vars, "ba_main", "technique"))) %>% 
+  group_by_at(vars(one_of(life_vars, "out_grouped", "ba_main", "technique"))) %>% 
   summarize(
+    n_together = length(unique(outcome_id)),
     mean_c = sum(mean_c),
     mean_e = sum(mean_e),
     var_c = sum(var_c), 
@@ -88,6 +85,11 @@ size_final <- escalc("SMDH",
                      data = size_final)
 
 
+# Save data ---------------------------------------------------------------
+saveRDS(size_final, paste0(temp, "dat_size.RDS"))
+
+
+# Analysis ----------------------------------------------------------------
 # Step 4: meta-analyze
 size_mod <- rma.mv(
   yi, vi, 
@@ -135,7 +137,3 @@ size_ba_res <- summary(glht(size_mod, linfct = contr_hit, df=df.residual(size_mo
 ## eyeball possible moderators
 forest(size_mod, addpred=TRUE)
 forest(size_mod, slab = size_final$cite)
-
-brdu_final %>% 
-  filter(unique_id %in% c("brdu_1", "brdu_5", "brdu_7", "brdu_9"))
-
