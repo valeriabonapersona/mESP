@@ -248,5 +248,5 @@ hippocampus <- structural_ft %>%
   )
 
 ## save data hippocampus
-saveRDS(hippocampus, paste0(final, "hippocampus.RDS"))
+saveRDS(hippocampus, paste0(temp, "hippocampus.RDS"))
 
