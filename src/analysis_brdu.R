@@ -1,5 +1,5 @@
 '
-Volume
+Brdu
 '
 
 # Environment preparation -------------------------------------------------
@@ -16,10 +16,6 @@ brdu <- hippocampus %>%
     sex == "male",
     out_grouped == "brdu_cells")
 
-life_vars <- c("cite", "link", "id", "exp_id", 
-               "sex", "age_testing_weeks", "model", "origin", 
-               "housing_after_weaning", "behavior", "major_chronic_stress", 
-               "acute_stress")
 
 '
   Main analysis
@@ -42,12 +38,13 @@ brdu_final <- brdu %>%
   )  %>% 
   
   # sum the volumes per experiment
-  group_by_at(vars(one_of(life_vars, "ba_main", "technique", "days_after_induction"))) %>% 
+  group_by_at(vars(one_of(life_vars, "ba_main", "out_grouped", "technique", "days_after_induction"))) %>% 
   summarize(
-    mean_c = sum(mean_c),
-    mean_e = sum(mean_e),
-    var_c = sum(var_c), 
-    var_e = sum(var_e),
+    n_together = length(unique(outcome_id)),
+    mean_c = mean(mean_c),
+    mean_e = mean(mean_e),
+    var_c = sum(var_c)/(n_together)^2, 
+    var_e = sum(var_e)/(n_together)^2,
     sd_c = sqrt(var_c), 
     sd_e = sqrt(var_e),
     n_e = mean(n_e), 
@@ -68,7 +65,8 @@ brdu_final <- brdu %>%
     chronic_num = ifelse(major_chronic_stress == "yes", 1, 0),
     trauma_score = rowSums(across(ends_with("_num"))), 
     trauma_presence = ifelse(trauma_score <= 1, "no", "yes"), 
-    induction = ifelse(days_after_induction > 1, "long", "short")
+    induction = ifelse(days_after_induction > 1, "long", "short"), 
+    acute = ifelse(acute_stress == "rest", "rest", "not_rest")
   )
 
 hist(brdu_final$trauma_score)
@@ -82,7 +80,7 @@ brdu_final <- escalc("SMDH",
 
 
 # Save data ---------------------------------------------------------------
-saveRDS(brdu_final, paste0(final, "dat_brdu.RDS"))
+saveRDS(brdu_final, paste0(temp, "dat_brdu.RDS"))
 
 
 # Analysis ----------------------------------------------------------------
@@ -126,6 +124,4 @@ size_hit_res <- summary(glht(brdu_mod, linfct = contr_hit, df=df.residual(brdu_m
 forest(brdu_mod)
 forest(brdu_mod, slab = brdu_final$unique_id)
 
-brdu_final %>% 
-  filter(unique_id %in% c("brdu_1", "brdu_5", "brdu_7", "brdu_9"))
   
