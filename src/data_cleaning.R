@@ -152,7 +152,7 @@ struct <- dat_xl$out_structural %>%
     cite = paste0(authors, "(", year,")")) %>%
   
   # keep only included publ so far
-  filter(exp_id %in% exp_ft$exp_id) %>% 
+  filter(id %in% publ_ft$id) %>% 
   
   # categorize outcomes
   mutate(
@@ -352,7 +352,8 @@ struct <- dat_xl$out_structural %>%
     brain_area_publication, ba_grouped, brain_area_hemisphere, ba_main, ba_location, ba_layer,
     data_unit, data_unit_check,
     n_c, n_e, mean_c, mean_e, sd_c, sd_e, sys_review_sig
-         )
+         ) %>%
+  unique()
 
 ## check that there are no NAs in the summ stats --> must be 0
 struct %>% 
@@ -364,8 +365,7 @@ struct %>%
 ## check all deviations are positive
 sum(struct$sd_c <= 0, na.rm = T)
 sum(struct$sd_e <= 0, na.rm = T)
-
-
+struct$outcome_id[duplicated(struct$outcome_id)]
 # Save temp data ----------------------------------------------------------
 
 saveRDS(struct, paste0(temp, "structural_plasticity_complete.RDS"))
