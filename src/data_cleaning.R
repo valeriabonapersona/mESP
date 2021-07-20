@@ -3,7 +3,7 @@
   
   Author: Valeria Bonapersona
   
-  Inout: excel file with relational structure, manually coded
+  Input: excel file with relational structure, manually coded
   Output: structural plasticity data to be analyzed
   
 '
@@ -289,7 +289,7 @@ struct <- dat_xl$out_structural %>%
   
   ## summary statistics corrections
   mutate(
-    sd_c = ifelse(is.na(sd_c), sd_e, sd_c), 
+  #  sd_c = ifelse(is.na(sd_c), sd_e, sd_c), ## move to next 
     mean_c = ifelse(is.na(mean_c) & str_detect(data_unit, "perc_"), 0, mean_e), # these valyes were actual missings due to the data type
     
     # correct typos (have been doubled checked with papers)
@@ -297,20 +297,69 @@ struct <- dat_xl$out_structural %>%
     sd_e = ifelse(id %in% c("12140784","17561822"), abs(sd_e), sd_e)
     
   ) %>%
+  
+  # group brain areas
+  # rename brain areas
+  mutate(
+    ba_main = case_when(
+      str_detect(brain_area_publication, "dentate|GZ") ~ "dentate_gyrus", 
+      str_detect(brain_area_publication, "CA1") ~ "CA1", 
+      str_detect(brain_area_publication, "CA3") ~ "CA3", 
+      str_detect(brain_area_publication, "CA4") ~ "CA4", 
+      str_detect(brain_area_publication, "hippocamp") ~ "hippocampus_total", 
+      
+      brain_area_publication == "cortex_prefrontal" ~ "prefrontal_cortex",
+      str_detect(brain_area_publication, "prefrontal_cortex") ~ "prefrontal_cortex", 
+      
+      brain_area_publication == "amygdala_basolateral" ~ "basolateral_amygdala",
+      str_detect(brain_area_publication, "nucleus_accumbens") ~ "nucleus_accumbens", 
+      str_detect(brain_area_publication, "orbital_frontal") ~ "orbitofrontal_cortex",
+      str_detect(brain_area_publication, "cortical") ~ "cortex",
+      
+      T ~ brain_area_publication
+    ),
+    ba_location = case_when(
+      str_detect(brain_area_publication, "dorsal") ~ "dorsal", 
+      str_detect(brain_area_publication, "ventral") ~ "ventral", 
+      str_detect(brain_area_publication, "basal") ~ "basal", 
+      str_detect(brain_area_publication, "caudal") ~ "caudal", 
+      str_detect(brain_area_publication, "apical") ~ "apical", 
+      str_detect(brain_area_publication, "rostral") ~ "rostral", 
+      str_detect(brain_area_publication, "medial") ~ "medial", 
+      
+      T ~ "not_specified"
+    ), 
+    ba_layer = case_when(
+      str_detect(brain_area_publication, "subgranular") ~ "subgranular", 
+      str_detect(brain_area_publication, "suprapyr") ~ "suprapyramidal", 
+      str_detect(brain_area_publication, "infrapyr") ~ "infrapyramidal",
+      str_detect(brain_area_publication, "granular|GZ") ~ "granular", 
+      str_detect(brain_area_publication, "pyramyd") ~ "pyramydal", 
+      str_detect(brain_area_publication, "hilus") ~ "hilus", 
+      
+      str_detect(brain_area_publication, "stratum|layer|blade|connecting") ~ "specific_stratum_layer_blade", 
+   #   T ~ "not_specified" # make sure you first re-double check them!
+   T ~ brain_area_publication
+    )
+  ) %>%
     
   # select vars of interest
   dplyr::select(
     cite, authors, year, link, id, exp_id, outcome_id, 
     sex, age_testing_weeks, model, origin, housing_after_weaning,   
     behavior, major_life_events, at_death,
-    outcome, out_grouped, product_measured, technique, data_unit, data_unit_check,
-    days_after_induction,
-    brain_area_publication, ba_grouped, brain_area_hemisphere,
+    outcome, out_grouped, product_measured, technique, days_after_induction,
+    brain_area_publication, ba_grouped, brain_area_hemisphere, ba_main, ba_location, ba_layer,
+    data_unit, data_unit_check,
     n_c, n_e, mean_c, mean_e, sd_c, sd_e, sys_review_sig
          )
 
 ## check that there are no NAs in the summ stats --> must be 0
-struct %>% dplyr::select(c(ends_with("_c"), ends_with("_e"))) %>% is.na() %>% sum() 
+struct %>% 
+  filter(!str_detect(data_unit, "perc_|fold")) %>% # percentage and fold change might miss deviation
+  dplyr::select(c(ends_with("_c"), ends_with("_e"))) %>% 
+  is.na() %>% 
+  sum() 
 
 ## check all deviations are positive
 sum(struct$sd_c <= 0, na.rm = T)
