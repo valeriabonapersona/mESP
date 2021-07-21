@@ -290,7 +290,7 @@ struct <- dat_xl$out_structural %>%
   ## summary statistics corrections
   mutate(
   #  sd_c = ifelse(is.na(sd_c), sd_e, sd_c), ## move to next 
-    mean_c = ifelse(is.na(mean_c) & str_detect(data_unit, "perc_"), 0, mean_e), # these valyes were actual missings due to the data type
+    mean_c = ifelse(is.na(mean_c) & str_detect(data_unit, "perc_"), 0, mean_c), # these valyes were actual missings due to the data type
     
     # correct typos (have been doubled checked with papers)
     sd_c = ifelse(id %in% c("12140784","17561822"), abs(sd_c), sd_c),
