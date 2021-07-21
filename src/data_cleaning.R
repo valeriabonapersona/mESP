@@ -340,7 +340,25 @@ struct <- dat_xl$out_structural %>%
       str_detect(brain_area_publication, "stratum|layer|blade|connecting") ~ "specific_stratum_layer_blade", 
    #   T ~ "not_specified" # make sure you first re-double check them!
    T ~ brain_area_publication
-    )
+    ),
+   
+   part_cell = case_when(
+     str_detect(outcome, "basal") ~ "basal",
+     str_detect(outcome, "apical") ~ "apical",
+     str_detect(outcome, "primary") ~ "primary",
+     out_grouped %in%
+       c("ki67", "dcx", "brdu_cells", "size", "bdnf") ~ "not_applicable",
+     T ~ "not_specified"),
+   
+    distance_cell = case_when(
+      str_detect(outcome, "distal") ~ "distal",
+      str_detect(outcome, "proximal") ~ "proximal",
+      str_detect(outcome, "medial") ~ "medial",
+      out_grouped %in%
+        c("ki67", "dcx", "brdu_cells", "size", "bdnf") ~ "not_applicable",
+
+      T ~ "not_specified")
+
   ) %>%
     
   # select vars of interest
@@ -350,6 +368,7 @@ struct <- dat_xl$out_structural %>%
     behavior, major_life_events, at_death,
     outcome, out_grouped, product_measured, technique, days_after_induction,
     brain_area_publication, ba_grouped, brain_area_hemisphere, ba_main, ba_location, ba_layer,
+    part_cell, distance_cell,
     data_unit, data_unit_check,
     n_c, n_e, mean_c, mean_e, sd_c, sd_e, sys_review_sig
          ) %>%
@@ -366,10 +385,9 @@ struct %>%
 sum(struct$sd_c <= 0, na.rm = T)
 sum(struct$sd_e <= 0, na.rm = T)
 struct$outcome_id[duplicated(struct$outcome_id)]
-# Save temp data ----------------------------------------------------------
 
+
+# Save temp data ----------------------------------------------------------
 saveRDS(struct, paste0(temp, "structural_plasticity_complete.RDS"))
 write.csv(struct, paste0(temp, "structural_plasticity_complete.csv"))
-
-
 
