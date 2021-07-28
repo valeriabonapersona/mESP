@@ -27,91 +27,141 @@ struct <- struct %>%
   
   # get missing variances
   mutate(
+    # we assume equality of variances between the groups when deviation is missing
     sd_c = ifelse(is.na(sd_c), sd_e, sd_c),
     # n_c and n_e have no missing values
   )
 
-# find legal merging of datapoints
-exp_for_merging <- struct %>% 
-  mutate(part_cell = case_when(
-    str_detect(outcome, "basal") ~ "basal",
-    str_detect(outcome, "apical") ~ "apical",
-    str_detect(outcome, "primary") ~ "primary",
-    out_grouped %in% 
-      c("ki67", "dcx", "brdu_cells", "size", "bdnf") ~ "not_applicable",
-    T ~ "not_specified"),
-    
-    distance_cell = case_when(
-      str_detect(outcome, "distal") ~ "distal",
-      str_detect(outcome, "proximal") ~ "proximal",
-      str_detect(outcome, "medial") ~ "medial",
-      out_grouped %in% 
-        c("ki67", "dcx", "brdu_cells", "size", "bdnf") ~ "not_applicable",
-      T ~ "not_specified"), 
-    
-    about_cell = paste(part_cell, distance_cell, sep = "_")
-    ) %>%
-  group_by_at(vars(one_of(life_vars, "out_grouped", "ba_main", "technique"))) %>% 
-  summarize(
-    n = length(exp_id),
-    ba_full = paste0(brain_area_publication, collapse = "; "),
-    about_cell = paste0(about_cell, collapse = "; "),
-    .groups = "drop") %>%
-  filter(n > 1) %>% 
-  select(cite, exp_id, out_grouped, ba_main, technique, n, 
-         ba_full, about_cell) %>%
-  rowwise() %>%
+# all exp have been manually checked for merging. 
+# The following where double, i.e. present both as "total" and as pyramidal and granual layers
+double_outcomes <- c("24129488_1_morph_5", "24129488_1_morph_6")
+exp_one_hem <- "22371048_2"
+
+# prepare dataset
+## size
+size <- struct %>% 
+  # remove double outcomes
+  filter(!outcome_id %in% double_outcomes, 
+         out_grouped == "size") %>% 
+  
+  # get variances
   mutate(
-    worry_ba = case_when(
-      str_detect(ba_full,"total") ~ TRUE,
-      any(duplicated(str_split(ba_full, "; ")[[1]])) ~ TRUE,
-      T ~ FALSE
-  ),
-    worry_cell = case_when(
-      any(duplicated(str_split(about_cell, "; ")[[1]])) ~ TRUE,
-      T ~ FALSE
-  ), 
-    to_check = ifelse(worry_ba == TRUE & worry_cell == TRUE, TRUE, FALSE)
+    # get variances
+    var_c = sd_c^2,
+    var_e = sd_e^2, 
+    across(starts_with(c("mean_", "var_")), function(x)ifelse(exp_id %in% exp_one_hem, x*2, x)),
+    across(c("part_cell", "distance_cell"), function(x)str_remove_all(x,"not_applicable"))
+  )  %>% 
+  
+  # sum the volumes per experiment, get the mean for the other outcomes
+  group_by_at(vars(one_of(life_vars, "out_grouped", "ba_grouped", 
+                          "ba_main", "product_measured", "days_after_induction"))) %>% 
+  summarize(
+    n_together = length(unique(outcome_id)),
+    
+    # means
+    across(starts_with("mean_"), function(x) sum(x)),
+    
+    # variances
+    across(starts_with("var_"), function(x) sum(x)),
+    
+    # standard deviations
+    sd_c = sqrt(var_c),
+    sd_e = sqrt(var_e),
+    
+    # sample sizes
+    across(starts_with("n_"), function(x) mean(x)),
+    
+    # ba_location_layer = paste(paste(ba_location, ba_layer, sep = "-"), collapse = "; "), 
+    # about_cell = paste(paste(part_cell, distance_cell, sep = "-"), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  
+  ungroup() %>%
+  # unique identified
+  mutate(unique_id = paste(out_grouped, 1:nrow(.)), sep ="_") %>% 
+  relocate(unique_id, .after = exp_id) %>% 
+  
+  # var to describe life events
+  mutate(
+    origin_num = ifelse(origin == "purchased_pregnant_dams", 1, 0),
+    behavior_num = ifelse(behavior == "stressful", 1, 0),
+    #  housing_num = ifelse(housing_after_weaning == "single", 1, 0),
+    chronic_num = ifelse(major_life_events == "yes", 1, 0),
+    trauma_score = rowSums(across(ends_with("_num"))), 
+    trauma_presence = ifelse(trauma_score < 1, "no", "yes")
   )
-
-# Manually checked experiments
-# 24129488_1, size keep only hippocampus_total
-exp_with_illegal_merge <- c("24129488_1")
-exp_id_already_checked <- c("24129488_1", 
-                            "29471293_1", "29471293_2", # legal
-                            "19460425_1", "19460425_2", "19460425_3", "19460425_4", # deleted wrong outcome excel
-                            "24802968_1", "24802968_2", # legal
-                            "25159716_1", # legal
-                            "17561822_1", # legal
-                            "27657911_2", # this has left and right hemisphere
-                            "27657911_3", "23237316_3",
-                            "17164818_1", "17164818_2", "17164818_3",
-                            "29022091_1" # changed ba in excel
-)
-
+  
+  
+## other outcomes
 dat <- struct %>% 
   
-  # fix the merging
-  left_join(exp_for_merging %>% select(-c(n, ba_full, about_cell, worry_ba, worry_cell))) %>% 
+  # remove double outcomes
+  filter(!outcome_id %in% double_outcomes, 
+         # size has a different processing
+         out_grouped != "size") %>% 
   
+  # get variances
   mutate(
-    merging = case_when(
-    to_check == FALSE ~ "legal",
-    is.na(to_check) ~ "not_merged",
-    exp_id %in% c("29471293_1", "29471293_2", "24802968_1", "24802968_2", 
-                  "25159716_1", "25159716_2", "17561822_1", "27657911_3", "17164818_1",
-                  "17164818_2", "17164818_3", "29022091_1", "23237316_3",
-                  "27657911_2" # legal but be careful because it has left and right hem
-                  ) ~ "legal",
-    T ~ "to_check"
-    ),
-    double_outcome = case_when(
-      merging == "legal" ~ "no",
-      all(merging != "not_merged", exp_id == "24129488_1", out_grouped == "size") ~ 
-        ifelse(str_detect(ba_layer, "total"), "no", "yes"),
-      
-      T ~ "yolo"
-    )
-  )
+    # get variances
+    var_c = sd_c^2,
+    var_e = sd_e^2, 
+    
+    across(c("part_cell", "distance_cell"), function(x)str_remove_all(x,"not_applicable"))
+  )  %>% 
+  
+  # sum the volumes per experiment, get the mean for the other outcomes
+  group_by_at(vars(one_of(life_vars, "out_grouped", "ba_grouped", "ba_main", 
+                          "product_measured", "days_after_induction"))) %>% 
+  summarize(
+    n_together = length(unique(outcome_id)),
+    
+    # means
+    across(starts_with("mean_"), function(x) mean(x)),
+    
+    # variances
+    across(starts_with("var_"), function(x) sum(x)/(n_together^2)),
+    
+    # standard deviations
+    sd_c = sqrt(var_c),
+    sd_e = sqrt(var_e),
+    
+    # sample sizes
+    across(starts_with("n_"), function(x) mean(x)),
+    
+    # ba_location_layer = paste(paste(ba_location, ba_layer, sep = "-"), collapse = "; "), 
+    # about_cell = paste(paste(part_cell, distance_cell, sep = "-"), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  
+  ungroup() %>%
+  # unique identified
+  mutate(unique_id = paste(out_grouped, 1:nrow(.)), sep ="_") %>% 
+  relocate(unique_id, .after = exp_id) %>% 
+  
+  # var to describe life events
+  mutate(
+    origin_num = ifelse(origin == "purchased_pregnant_dams", 1, 0),
+    behavior_num = ifelse(behavior == "stressful", 1, 0),
+  #  housing_num = ifelse(housing_after_weaning == "single", 1, 0),
+    chronic_num = ifelse(major_life_events == "yes", 1, 0),
+    trauma_score = rowSums(across(ends_with("_num"))), 
+    trauma_presence = ifelse(trauma_score < 1, "no", "yes")
+  ) %>% 
+  
+  # get size back
+  bind_rows(size)
+
+# calculate effect size
+dat <- escalc("SMDH",
+              m1i = mean_e, sd1i = sd_e, n1i = n_e,
+              m2i = mean_c, sd2i = sd_c, n2i = n_c, 
+              data = dat)
+
+
+
+# Save data for analysis --------------------------------------------------
+saveRDS(dat, paste0(final, "data_for_analysis.RDS"))
+
 
 
