@@ -167,9 +167,10 @@ struct <- dat_xl$out_structural %>%
       str_detect(outcome, "volume|width") ~ "size",
       str_detect(outcome, "length|µm") ~ "length_dendrites", 
       str_detect(outcome, "point|branching|n_intersection") ~ "branching_dendrites", 
-      str_detect(outcome, "n_") ~ "number_dendrites", 
       str_detect(outcome, "complexity") ~ "complexity", 
       str_detect(outcome, "bdnf") ~ "bdnf",
+      str_detect(outcome, "n_") ~ "number_dendrites", 
+      
       T ~ outcome
     ), 
     ba_grouped = case_when(
@@ -364,7 +365,7 @@ struct <- dat_xl$out_structural %>%
   # select vars of interest
   dplyr::select(
     cite, authors, year, link, id, exp_id, outcome_id, 
-    sex, age_testing_weeks, model, origin, housing_after_weaning,   
+    sex, species, strain, age_testing_weeks, model, origin, housing_after_weaning,   
     behavior, major_life_events, at_death,
     outcome, out_grouped, product_measured, technique, days_after_induction,
     brain_area_publication, ba_grouped, brain_area_hemisphere, ba_main, ba_location, ba_layer,
