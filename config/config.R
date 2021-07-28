@@ -19,6 +19,6 @@ final <- "data/processed/"
 # Other vars --------------------------------------------------------------
 life_vars <- c("cite", "link", "id", "exp_id", 
                "sex", "age_testing_weeks", "model", "origin", 
-               "housing_after_weaning", "behavior", "major_chronic_stress", 
-               "acute_stress")
+               "housing_after_weaning", "behavior", "major_life_events", 
+               "at_death")
 
