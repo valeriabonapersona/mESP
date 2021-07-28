@@ -90,3 +90,27 @@ get_mean_range <- function(my_range) {
   
 }
 
+
+
+# Analysis ----------------------------------------------------------------
+
+t.test2 <- function(m1,m2,var1,var2,n1,n2,m0=0,equal.variance=FALSE)
+{
+  if( equal.variance==FALSE ) 
+  {
+    se <- sqrt( (var1/n1) + (var2/n2) )
+    # welch-satterthwaite df
+    df <- ( (var1/n1 + var2/n2)^2 )/( (var1/n1)^2/(n1-1) + (var2/n2)^2/(n2-1) )
+  } else
+  {
+    # pooled standard deviation, scaled by the sample sizes
+    se <- sqrt( (1/n1 + 1/n2) * ((n1-1)*var1 + (n2-1)*var2)/(n1+n2-2) ) 
+    df <- n1+n2-2
+  }      
+  t <- (m1-m2-m0)/se 
+  dat <- c(m1-m2, se, t, 2*pt(-abs(t),df))    
+  names(dat) <- c("Difference of means", "Std Error", "t", "p-value")
+  return(dat[["p-value"]]) 
+}
+
+
