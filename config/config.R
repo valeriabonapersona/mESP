@@ -13,7 +13,7 @@
 raw   <- "data/raw/"
 temp  <- "data/temp/"
 final <- "data/processed/"
-
+figs_svg <- "results/figures/svg/"
 
 
 # Other vars --------------------------------------------------------------
