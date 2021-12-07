@@ -164,13 +164,12 @@ struct <- dat_xl$out_structural %>%
       
     out_grouped = case_when(
       str_detect(outcome, "spine") ~ "spines",
-      str_detect(outcome, "volume|width") ~ "size",
+      str_detect(outcome, "volume|width") ~ "volume",
       str_detect(outcome, "length|µm") ~ "length_dendrites", 
-      str_detect(outcome, "point|branching|n_intersection") ~ "branching_dendrites", 
+      str_detect(outcome, "point|branching|n_intersection") ~ "branching", 
       str_detect(outcome, "complexity") ~ "complexity", 
       str_detect(outcome, "bdnf") ~ "bdnf",
-      str_detect(outcome, "n_") ~ "number_dendrites", 
-      
+
       T ~ outcome
     ), 
     ba_grouped = case_when(
@@ -348,7 +347,7 @@ struct <- dat_xl$out_structural %>%
      str_detect(outcome, "apical") ~ "apical",
      str_detect(outcome, "primary") ~ "primary",
      out_grouped %in%
-       c("ki67", "dcx", "brdu_cells", "size", "bdnf") ~ "not_applicable",
+       c("ki67", "dcx", "brdu_cells", "volume", "bdnf") ~ "not_applicable",
      T ~ "not_specified"),
    
     distance_cell = case_when(
@@ -356,7 +355,7 @@ struct <- dat_xl$out_structural %>%
       str_detect(outcome, "proximal") ~ "proximal",
       str_detect(outcome, "medial") ~ "medial",
       out_grouped %in%
-        c("ki67", "dcx", "brdu_cells", "size", "bdnf") ~ "not_applicable",
+        c("ki67", "dcx", "brdu_cells", "volume", "bdnf") ~ "not_applicable",
 
       T ~ "not_specified")
 
