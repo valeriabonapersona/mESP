@@ -2,7 +2,20 @@
 
 Version 0.1.0
 
-Effects of early life adversity on structural plasticity in rodents
+Structural changes of early life adversity in rodents: a systematic review and meta-analysis. 
+For information about this project, see https://osf.io/9gru2/
+
+To reproduce the results and figures for the analysis, you need to run the file src/analysis.rmd . This generates and HTML file will all information required. For this file to run, you need: 
+- to install dependencies. Most dependencies will install automatically, with exception of 1) knitr, 2) metaforest and 3) caret. All these are on CRAN, so you can simply install them as "install.packges('name_package')
+- to copy the data in the correct folders. Specifically, you should have two data files (data/processed/data_for_analysis.RDS and data/temp/structural_plasticity_complete.RDS). These files are the RDS counterpart of the .csv files available at our depository (https://osf.io/9gru2/)
+
+
+To run the risk of bias assessment, you need to:
+- run src/rob_df.R
+- run src/figure_rob.R
+
+
+If you encounter any problem, feel free to get in touch!
 
 
 ## Project organization
