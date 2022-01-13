@@ -13,7 +13,7 @@
 .csv
 .xlsx
 .RDS
-
+/data/*
 
 /docs/*
 /results/*
