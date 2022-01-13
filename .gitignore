@@ -10,4 +10,12 @@
 
 # Other
 .DS_Store
+.RData
+.Rhistory
+
 /docs/*
+/results/*
+.eps
+.ai
+.png
+
