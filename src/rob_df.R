@@ -38,6 +38,7 @@ rob <- dat %>%
   mutate(
     bias = case_when(
       item == "incomplete_data" & bias == "low" ~ "not_applicable",
+      item == "selective_outcome_reporting" ~ "unclear",
       bias %in% c("medium", "high") ~ "no",
       bias %in% c("low") ~ "yes", 
       T ~ bias
@@ -46,5 +47,3 @@ rob <- dat %>%
 
 saveRDS(rob, paste0(final, "rob.RDS"))  
 
-
-  
