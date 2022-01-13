@@ -1,0 +1,1359 @@
+---
+title: "Analysis Structural Plasticity"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+source("config/utilities.R")
+source("src/general_funs.R")
+library(knitr) # for tables
+library(metaforest) # for exploratory analysis
+library(caret) # for exploratory analysis
+options(scipen=1, digits=3)
+```
+
+# Results
+```{r load data, include=FALSE}
+dat <- readRDS(paste0(final, "data_for_analysis.RDS"))
+struct <- readRDS(paste0(temp, "structural_plasticity_complete.RDS"))
+
+# calculate variances
+dat <- dat %>% 
+  mutate(
+    var_c = sd_c^2,
+    var_e = sd_e^2
+  )
+
+# papers with both sexes
+id_both_sex <- dat %>% 
+  group_by(id, sex) %>% 
+  count() %>%
+  pivot_wider(names_from = "sex", values_from = "n") %>% 
+  na.omit()
+
+neuro_outcomes <- c("brdu_cells", "dcx", "ki67")
+morph_outcomes <- c("volume", "branching", "length_dendrites")
+```
+
+## Info for flow chart
+Number of included publications: `r n_distinct(dat$id)`. 
+Number of included experiments: `r n_distinct(dat$exp_id)`
+Number of included comparisons **before** preprocessing: `r nrow(struct)`
+Number of included comparisons **after** preprocessing: `r nrow(dat)`
+
+Number of excluded comparisons due to missing data: CHECK
+
+## Study selection and characteristics
+Publications using rats: `r length(unique(dat[dat$species == "rat",]$id))/length(unique(dat$id))*100`%
+Publications using maternal separation: `r n_distinct(dat[dat$model == "maternal_separation",]$id)/n_distinct(dat$id)*100`
+Publications using limited nesting and bedding: `r n_distinct(dat[dat$model == "limited_nesting",]$id)/n_distinct(dat$id)*100`
+Publications using maternal deprivation: `r n_distinct(dat[dat$model == "maternal_deprivation",]$id)/n_distinct(dat$id)*100`
+Publications using licking and grooming: `r n_distinct(dat[dat$model == "licking_grooming",]$id)/n_distinct(dat$id)*100`
+Publications using isolation: `r n_distinct(dat[dat$model == "isolation",]$id)/n_distinct(dat$id)*100`
+
+Estimated number of animals used: ~`r sum(c(dat$n_e, dat$n_c))`
+Percentage males: `r sum(c(dat[dat$sex == "male",]$n_e, dat[dat$sex == "male",]$n_c)) / sum(c(dat$n_e, dat$n_c)) * 100`%
+Number of publications using both males and females: `r n_distinct(id_both_sex$id)`
+Average frequency female data: mean(freq_fem$unique_id)`±`r sd(freq_fem$unique_id)` comparisons from `r mean(freq_fem$id)`±`r sd(freq_fem$id)` publications
+
+*Table 1* summarises the frequency of each outcome. 
+
+```{r freq outcomes, echo=FALSE, results='asis'}
+freq_out <- dat %>% 
+  mutate(
+    out_grouped = ifelse(str_detect(out_grouped, "dendrit|complexity|branch"), "dendritic_changes", out_grouped), 
+    functional_interpretation = case_when(
+      out_grouped %in% c("volume", "spines", "dendritic_changes") ~ "morphology",
+      out_grouped == "bdnf" ~ "bdnf",
+      T ~ "neurogenesis")) %>%
+  group_by(functional_interpretation, out_grouped) %>% 
+  summarize(
+    across(ends_with("id"), function(x) length(unique(x))), 
+    .groups = "drop"
+  ) %>% 
+  arrange(-unique_id) %>% 
+  rename(n_id = id, n_exp_id = exp_id, n_comp = unique_id, outcome = out_grouped) %>% 
+  arrange(functional_interpretation)
+
+kable(freq_out)
+
+```
+
+Percentage hippocampus comparisons: `r nrow(dat[dat$ba_grouped == "hippocampus",])/nrow(dat) *100`
+Within the hippocampus, `r nrow(dat[dat$ba_main == "dentate_gyrus",])` comparisons were from the hippocampus, `r nrow(dat[dat$ba_main == "CA1",])` from the CA1, `r nrow(dat[dat$ba_main == "CA3",])` from the CA3, `r nrow(dat[dat$ba_main == "CA4",])` from the CA4, while `r nrow(dat[dat$ba_main == "hippocampus_total",])` measured the whole hippocampus.
+
+
+```{r freq ba, fig.height=14, fig.width=10, echo=FALSE}
+
+freq_ba <- dat %>% 
+  group_by(ba_grouped) %>% 
+  summarize(
+    across(ends_with("id"), function(x) length(unique(x))/nrow(.)*100), 
+    .groups = "drop"
+  )
+
+g_freq_ba <- freq_ba %>% 
+  arrange(unique_id) %>%
+  mutate(
+    ba_grouped = str_replace_all(ba_grouped, "_", " "),
+    ba_grouped = factor(ba_grouped, ba_grouped)
+    ) %>%
+  ggplot(aes(ba_grouped,unique_id)) + 
+  geom_segment(aes(x=ba_grouped ,xend=ba_grouped, 
+                   y=0, yend=unique_id), color="grey") +
+  geom_point(size = 2) +
+  coord_flip() + 
+  scale_y_continuous(breaks = c(0, 25, 50, 75), 
+                     labels = c("0%", "25%", "50%", "75%")) + 
+  labs(
+    y = "% comparisons",
+    x = "Brain areas"
+  ) + 
+  my_theme
+
+ggsave(g_freq_ba, filename = "results/fig_2.eps", width = 6, height = 4) 
+
+g_freq_ba
+```
+
+
+## Main Analysis
+```{r quant data}
+# from dendrite morphology remove granule cells (only 3)
+morph_granule_cells <- dat %>% 
+  filter(out_grouped %in% c("branching", "length_dendrites"), 
+         ba_main == "dentate_gyrus") %>% 
+  pull(unique_id)
+
+hip_full <- dat %>% 
+  filter(
+    sex == "male",
+    ba_grouped == "hippocampus") %>% 
+  
+  # correct for mods analyses
+  mutate(
+    product_measured = case_when(
+      out_grouped != "bdnf" ~ "not_applicable",
+      product_measured %in% c("mrna", "rna") ~ "rna",
+      T ~ product_measured
+    ), 
+    days_after_induction = case_when(
+      out_grouped != "brdu_cells" ~ "not_applicable",
+      days_after_induction <= 1 ~ "short", 
+      days_after_induction > 1 ~ "long"
+    )
+  )
+
+hip <- hip_full %>% 
+  
+  # select only data of interest
+  filter(
+    ba_main != "CA4",
+    !out_grouped %in% c("complexity", "n_basal_dendrite", "n_primary_dendrites", "spines"), 
+    !unique_id %in% morph_granule_cells
+    )
+```
+
+Based on the frequencies reported above, we included in the quantitative synthesis only the outcomes in the hippocampus (CA4 excluded, n~publ~ = `r n_distinct(hip_full[hip_full$ba_main == "CA4",]$id)`), measured in male mice. Similarly, the number of dendrites (n~publ~ = `r n_distinct(hip_full[hip_full$out_grouped == "number_dendrites",]$id)`) and spine density (n~publ~ = `r n_distinct(hip_full[hip_full$out_grouped == "spines",]$id)`) were not included in the meta-analyses due to the limited number of publications. Table 2 summarizes their main results. Concerning the complexity outcome, except for `r n_distinct(hip_full[hip_full$out_grouped == "complexity",]$id)` publication, all the individual measures of this composite score were extracted and here analyzed separately. Ultimately, `r nrow(hip)` comparisons from `r n_distinct(hip$id)` distinct publications (n~exp~=`r n_distinct(hip$exp_id)`) were included in the quantitative analysis.
+
+```{r table 2, echo=FALSE}
+other_outcomes_table <- hip_full %>%
+  
+  # select only data of interest
+  filter(
+    ba_main != "CA4",
+    out_grouped %in% c("n_primary_dendrites", "n_basal_dendrite", "spines"),
+    !unique_id %in% morph_granule_cells
+  ) %>%
+  mutate(
+    yi = round(yi, 2), 
+    vi = round(vi, 2),
+    sig = case_when(
+      ((abs(yi) - vi) > 0) & yi > 0 ~ "+",
+      ((abs(yi) - vi) > 0) & yi < 0 ~ "-",
+      T ~ "ns"
+    )
+  ) %>%
+  arrange(out_grouped) %>%
+  mutate_all(~ str_replace_all(., "_", " ")) %>%
+  select(cite, link, 
+         model, origin, behavior, major_life_events,
+         at_death, out_grouped, ba_main, yi, vi, sig)
+names(other_outcomes_table) <- str_replace_all(names(other_outcomes_table), "_", " ")
+
+kable(other_outcomes_table)
+
+```
+
+### Effects of early life adversity on morphology
+
+```{r morphology models, include=FALSE}
+morph_df <- hip %>% filter(out_grouped %in% morph_outcomes)
+
+## final
+mod_morph <- rma.mv(
+  yi, vi, 
+#  random = ~ 1|id,  
+  random = list(~1|outcome_id, ~1|exp_id),
+  method = "REML",
+  data = morph_df,
+  mods = ~ out_grouped:ba_main:trauma_presence - 1,
+  slab = exp_id
+)
+
+# calculate I2
+W <- diag(1/hip[hip$out_grouped %in% c("volume", "branching", "length_dendrites"),]$vi)
+X <- model.matrix(mod_morph)
+P <- W - W %*% X %*% solve(t(X) %*% W %*% X) %*% t(X) %*% W
+I2_morph <- 100 * sum(mod_morph$sigma2) / (sum(mod_morph$sigma2) + (mod_morph$k-mod_morph$p)/sum(diag(P)))
+
+```
+
+Morphology test of moderators: Q~m~(`r mod_morph$QMdf[1]`)=`r mod_morph$QM`, *p*=`r mod_morph$QMp`
+Morphology remaining heterogeneity: Q~h~(25)=`r mod_morph$QE`, *p*=`r mod_morph$QEp`, I^2^ = `r I2_morph`
+
+
+```{r morphology tests, include=FALSE}
+interactions <- names(data.frame(mod_morph$X))
+
+# contrasts organized in table
+other <- c("dentate_gyrus", "CA1", "CA3", "trauma_presenceyes")
+
+morph_contr <-   cbind(
+      sapply(c(morph_outcomes, "trauma_presenceyes", "trauma_presenceno"), function(x) 
+  #  sapply(morph_outcomes, function(x) 
+      ifelse(str_detect(interactions,x),
+             1/sum(str_detect(interactions,x)),
+             0
+             )
+      ) %>% data.frame(),
+
+    sapply(other, function(x) 
+      
+      ifelse(str_detect(interactions,x),
+             1/sum(str_detect(interactions,x)),
+             -1/(length(interactions)-sum(str_detect(interactions,x)))
+             )
+    )
+)
+
+
+morph_contr <- morph_contr %>% t() %>% as.matrix()
+
+# of note, trauma presence yes / no vs 0 has been added only for visualization purposes. The analysis as reported in the manuscript is without them
+morph_res <- summary(multcomp::glht(mod_morph, linfct = morph_contr, df=df.residual(mod_morph)), test=multcomp::adjusted('holm'))
+
+```
+
+Morphology results (to be intended as ELA vs control): 
+
+- volume hippocampus: *g*(se) = `r morph_res$test$coefficients["volume"]`(`r morph_res$test$sigma["volume"]`), t = `r morph_res$test$tstat["volume"]`, *p* = `r morph_res$test$pvalues["volume"]`
+- number branches per dendrite: *g*(se) = `r morph_res$test$coefficients["branching_dendrites"]`(`r morph_res$test$sigma["branching_dendrites"]`), t = `r morph_res$test$tstat["branching_dendrites"]`, *p* = `r morph_res$test$pvalues["branching_dendrites"]`
+- total dendritic length: *g*(se) = `r morph_res$test$coefficients["length_dendrites"]`(`r morph_res$test$sigma["length_dendrites"]`), t = `r morph_res$test$tstat["length_dendrites"]`, *p* = `r morph_res$test$pvalues["length_dendrites"]`
+- other traumatic life events: *g*(se) = `r morph_res$test$coefficients["trauma_presenceyes"]`(`r morph_res$test$sigma["trauma_presenceyes"]`), t = `r morph_res$test$tstat["trauma_presenceyes"]`, *p* = `r morph_res$test$pvalues["trauma_presenceyes"]`
+
+
+Subgroup on main parts of hippocampus: see Table 3 below.
+
+```{r table 3}
+res_morph_ba <- data.frame(
+  comparison = c("dentate vs CA1 + CA3", "CA1 vs dentate + CA3", "CA3 vs dentate + CA1"),
+  g = morph_res$test$coefficients[c("dentate_gyrus", "CA1", "CA3")], 
+  se = morph_res$test$sigma[c("dentate_gyrus", "CA1", "CA3")], 
+  t = morph_res$test$tstat[c("dentate_gyrus", "CA1", "CA3")], 
+  `p adj` = morph_res$test$pvalues[c("dentate_gyrus", "CA1", "CA3")]
+)
+rownames(res_morph_ba) <- NULL
+
+kable(res_morph_ba)
+
+```
+
+```{r morphology main bar plot}
+morph_res_df <- data.frame(
+  comparison = c("volume", "branching", "length_dendrites"),
+  g = morph_res$test$coefficients[c("volume", "branching", "length_dendrites")], 
+  se = morph_res$test$sigma[c("volume", "branching", "length_dendrites")], 
+  t = morph_res$test$tstat[c("volume", "branching", "length_dendrites")], 
+  pval = morph_res$test$pvalues[c("volume", "branching", "length_dendrites")], 
+  n_comp = morph_df %>% group_by(out_grouped) %>% count() %>% arrange(desc(out_grouped)) %>% pull(n),
+  n_id = morph_df %>% group_by(out_grouped) %>% summarize(n = length(unique(id))) %>% arrange(desc(out_grouped)) %>% pull(n)
+) %>% 
+  mutate(
+   lab_sig = case_when(
+    pval < .001 ~ "***", 
+    pval < .01 ~ "**", 
+    pval < .05 ~ "*", 
+    T ~ ""
+  )
+  )
+
+g_morph_main <- morph_res_df %>%
+  ggplot(aes(str_replace_all(comparison, "_", " \n"), g)) + 
+  geom_hline(yintercept = 0, color = "black") + 
+  geom_bar(stat = "identity", colour = "black", fill = "white") + 
+  geom_errorbar(aes(ymin = g-se, ymax = g+se), width = 0.2) +
+  geom_text(aes(label = lab_sig, y = g-se-0.1, size = 2)) +
+  geom_text(aes(label = paste0("study = ", n_id), y = -2.2)) +
+  geom_text(aes(label = paste0("comp = ", n_comp), y = -2.3)) +
+
+  # beautiful
+ # ylim(c(-0.2,0.8)) + 
+  my_theme + 
+  labs(x="", y = "Hedge's g") + 
+  theme(text = element_text(size = 20), 
+       # axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+        legend.position = "none")
+
+g_morph_main
+
+
+
+```
+
+
+```{r morphology hit bar plot}
+morph_res_df <- data.frame(
+  comparison = c("trauma_presenceyes", "trauma_presenceno"),
+  g = morph_res$test$coefficients[c("trauma_presenceyes", "trauma_presenceno")], 
+  se = morph_res$test$sigma[c("trauma_presenceyes", "trauma_presenceno")], 
+  t = morph_res$test$tstat[c("trauma_presenceyes", "trauma_presenceno")], 
+  pval = morph_res$test$pvalues[c("trauma_presenceyes", "trauma_presenceno")],
+  n_comp = morph_df %>% group_by(trauma_presence) %>% count() %>% arrange(desc(trauma_presence)) %>% pull(n),
+  n_id = morph_df %>% group_by(trauma_presence) %>% summarize(n = length(unique(id))) %>% arrange(desc(trauma_presence)) %>% pull(n)
+) %>% 
+  mutate(
+   lab_sig = case_when(
+    pval < .001 ~ "***", 
+    pval < .01 ~ "**", 
+    pval < .05 ~ "*", 
+    T ~ ""
+  )
+  )
+
+g_morph_hit <- morph_res_df %>%
+  mutate(
+    comparison = ifelse(comparison == "trauma_presenceno", "no other \nhits", "other \nhits"), 
+    comparison = factor(comparison, levels = c("no other \nhits", "other \nhits"))
+  ) %>%
+  ggplot(aes(comparison, g)) + 
+  geom_hline(yintercept = 0, color = "black") + 
+  geom_bar(stat = "identity", colour = "black", fill = "white") + 
+  geom_errorbar(aes(ymin = g-se, ymax = g+se), width = 0.2) +
+  geom_text(aes(label = lab_sig, y = g-se-0.1, size = 2)) +
+  geom_text(aes(label = paste0("study = ", n_id), y = -2.1)) +
+  geom_text(aes(label = paste0("comp = ", n_comp), y = -2.2)) +
+  geom_segment(aes(x = "other \nhits", y = 0.2, xend = "no other \nhits", yend = 0.2)) + 
+  geom_text(aes(x = 1.5, y = 0.3, label = "**", size = 2)) + 
+  # beautiful
+ # ylim(c(-0.2,0.8)) + 
+  my_theme + 
+  labs(x="", y = "Hedge's g") + 
+  theme(text = element_text(size = 20), 
+       # axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+        legend.position = "none")
+
+g_morph_hit
+
+
+
+```
+
+
+```{r morphology results barplot, fig.width=10, fig.height=8}
+## baseline & acute stress
+df_g_morph <- data.frame(
+  g = mod_morph$beta, 
+  se = mod_morph$se,
+  pval = mod_morph$pval
+) %>% 
+  mutate(
+   lab_sig = case_when(
+    pval < .001 ~ "***", 
+    pval < .01 ~ "**", 
+    pval < .05 ~ "*", 
+    T ~ ""
+  )) %>%
+  mutate(
+    out_grouped = str_remove_all(rownames(.), "out_grouped") %>% str_remove_all("\\:.*"),
+    ba_main = str_remove_all(rownames(.), ".*ba_main") %>% str_remove_all("\\:.*"),
+    trauma_presence = str_remove_all(rownames(.), ".*trauma_presence")
+  ) %>% 
+  left_join(morph_df %>% group_by(out_grouped, ba_main, trauma_presence) %>% summarize(n_comp = length(id), n_id = length(unique(id))))
+
+g_morph_supp <- df_g_morph %>%
+    mutate(
+    trauma_presence = ifelse(trauma_presence == "no", "no other \nhits", "other \nhits")
+  ) %>%
+  ggplot(aes(trauma_presence, g, fill = trauma_presence)) + 
+  geom_hline(yintercept = 0, color = "black") + 
+  geom_bar(stat = "identity", colour = "black") + 
+  geom_errorbar(aes(ymin = g-se, ymax = g+se), width = 0.2) +
+  
+  geom_text(aes(label = lab_sig, y = 0.2), size = 2) +
+  geom_text(aes(label = paste0("study = ", n_id), y = -4)) +
+  geom_text(aes(label = paste0("comp = ", n_comp), y = -4.5)) +
+  
+  # beautiful
+ # ylim(c(-0.2,0.8)) + 
+  my_theme + 
+  labs(x="", y = "Hedge's g", fill = "", size = "",
+) + 
+  facet_grid(str_replace_all(out_grouped, "_", " ")~str_replace_all(ba_main, "_", " ")) + 
+  scale_fill_manual(values = c("white", "grey")) + 
+  # geom_text(x = "Baseline", y = max(df_fig_main$g) + 0.2, label = "*", size = 20) + 
+  # geom_text(aes(y = 0.05, label = paste("n = ", n), size = 20)) + 
+  theme(text = element_text(size = 20), 
+        axis.text.x = element_blank(), 
+        legend.position = "bottom")
+
+g_morph_supp
+
+ggsave(g_morph_supp,filename =  "results/suppl_fig_1.eps", width = 10, height = 10)
+
+```
+
+
+#### Subgroup basal apical dendrites
+In the main analysis, I had processed together the basal and the apical dendrites. Here, I will tear them again apart, and re-perform the analysis, with the subgroup Wald-test approach. 
+
+```{r basal_apical}
+double_outcomes <- c("24129488_1_morph_5", "24129488_1_morph_6")
+basal_apical_df <- struct %>% 
+  filter(ba_grouped == "hippocampus", 
+         sex == "male",
+         out_grouped %in% c("branching", "length_dendrites"), 
+         !outcome_id %in% double_outcomes,
+         ba_main %in% c("CA1", "CA3"),
+         part_cell %in% c("basal", "apical")) %>%
+  mutate(
+    # we assume equality of variances between the groups when deviation is missing
+    sd_c = ifelse(is.na(sd_c), sd_e, sd_c),
+    # n_c and n_e have no missing values
+  )
+
+## keep only those that have both apical and basal
+# basal_apical_both_df <- basal_apical_df %>% 
+#   group_by(cite, id, out_grouped, part_cell) %>% 
+#   count() %>%
+#   pivot_wider(names_from = "part_cell", values_from = "n") %>% 
+#   drop_na() %>%
+#   mutate(keep = "yes") %>%
+#   left_join(basal_apical_df) %>% 
+#   filter(keep == "yes")
+
+basal_apical_both_df <- escalc("SMDH",
+            m1i = mean_e, sd1i = sd_e, n1i = n_e,
+            m2i = mean_c, sd2i = sd_c, n2i = n_c,
+            data = basal_apical_df)
+
+# other important vars
+basal_apical_both_df <- basal_apical_both_df %>% 
+  
+  # unique identified
+  mutate(unique_id = paste(out_grouped, 1:nrow(.)), sep ="_") %>% 
+  relocate(unique_id, .after = exp_id) %>% 
+  
+  # var to describe life events
+  mutate(
+    origin_num = ifelse(origin == "purchased_pregnant_dams", 1, 0),
+    behavior_num = ifelse(behavior == "stressful", 1, 0),
+    chronic_num = ifelse(major_life_events == "yes", 1, 0), # single housing is together with major life events
+    trauma_score = rowSums(across(ends_with("_num"))), 
+    trauma_presence = ifelse(trauma_score < 1, "no", "yes")
+  )
+
+## final
+mod_basal <- rma.mv(
+  yi, vi, 
+  random = ~ 1|id,
+  method = "REML",
+  data = basal_apical_both_df,
+#  mods = ~ out_grouped:ba_main:trauma_presence - 1,
+  subset=part_cell=="basal",
+  slab = exp_id
+)
+mod_apical <- rma.mv(
+  yi, vi, 
+  random = ~ 1|id,
+  method = "REML",
+  data = basal_apical_both_df,
+#  mods = ~ out_grouped:ba_main:trauma_presence - 1,
+  subset=part_cell=="apical",
+  slab = exp_id
+)
+
+dat.comp <- data.frame(estimate = c(coef(mod_basal), coef(mod_apical)), stderror = c(mod_basal$se, mod_apical$se),
+                       meta = c("basal","apical"), tau2 = round(c(mod_basal$tau2, mod_apical$tau2),3))
+
+basal_apical_res <- rma(estimate, sei=stderror, mods = ~ meta, method="FE", data=dat.comp, digits=3)
+basal_apical_res_main <- rma(estimate, sei=stderror, mods = ~ meta -1, method="FE", data=dat.comp, digits=3)
+basal_apical_res
+
+
+basal_apical_res_df <- data.frame(
+  comparison = c("apical \ndendrites", "basal \ndendrites"),
+  g = basal_apical_res_main$beta, 
+  se = basal_apical_res_main$se, 
+  z = basal_apical_res_main$zval, 
+  pval = basal_apical_res_main$pval, 
+  n_comp = basal_apical_both_df %>% group_by(part_cell) %>% count() %>% arrange(part_cell) %>% pull(n),
+  n_id = basal_apical_both_df %>% group_by(part_cell) %>% summarize(n = length(unique(id))) %>% arrange(part_cell) %>% pull(n)
+) %>% 
+  mutate(
+   lab_sig = case_when(
+    pval < .001 ~ "***", 
+    pval < .01 ~ "**", 
+    pval < .05 ~ "*", 
+    T ~ ""
+  )
+  )
+
+g_morph_basalapical <- basal_apical_res_df %>%
+  ggplot(aes(comparison, g)) + 
+  geom_hline(yintercept = 0, color = "black") + 
+  geom_bar(stat = "identity", colour = "black", fill = "white") + 
+  geom_errorbar(aes(ymin = g-se, ymax = g+se), width = 0.2) +
+  geom_text(aes(label = lab_sig, y = g-se-0.1, size = 2)) +
+  geom_text(aes(label = paste0("study = ", n_id), y = -1.7)) +
+  geom_text(aes(label = paste0("comp = ", n_comp), y = -1.8)) +
+
+  # beautiful
+ # ylim(c(-0.2,0.8)) + 
+  my_theme + 
+  labs(x="", y = "Hedge's g") + 
+  theme(text = element_text(size = 20), 
+       # axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+        legend.position = "none") + 
+  geom_segment(aes(x = "apical \ndendrites", y = 0.2, xend = "basal \ndendrites", yend = 0.2)) + 
+  geom_text(aes(x = 1.5, y = 0.3, label = "*", size = 2))
+
+g_morph_basalapical
+
+
+```
+
+
+```{r figure 3}
+
+fig3 <- ggpubr::ggarrange(
+  g_morph_main,
+  g_morph_hit,
+  g_morph_basalapical,
+   labels = c("A", "B", "C"),
+   nrow = 1
+)
+
+ggsave(fig3,filename =  "results/fig_3.eps", width = 14, height = 5)
+
+```
+
+
+
+### Effects of early life adversity on neurogenesis
+#### For Marian: Considerations about publications
+All papers mentioning only "subgranular zone" were considered as dentate gyrus.
+
+One paper (Pubmed id = `r hip %>% filter(out_grouped %in% c("brdu_cells", "dcx", "ki67"), ba_main != "dentate_gyrus") %>% pull(id) %>% unique()`) specifies "whole hippocampus". I have excluded this paper for now. 
+
+
+There is a paper from Naninck 2015 (https://doi.org/10.1002/hipo.22374
+), where there is a positive effect of ELA on ki67; however, they could not replicate it even in the same publication. From influential analysis, it seems that this paper is really "out" compared to the others when it comes to explaining heterogeneity. 
+
+#### Neurogenesis results
+
+```{r neurogenesis models, include=FALSE}
+neuro_df <- hip %>% 
+  filter(
+    out_grouped %in% neuro_outcomes, 
+    ba_main == "dentate_gyrus", 
+    id != "27644094", 
+    ) %>% 
+  mutate(
+    out_grouped = paste(out_grouped, days_after_induction, sep = "_") %>% str_remove_all("_not_applicable"), 
+    at_death = ifelse(at_death == "rest", "rest", "not_rest")
+  )
+
+mod_neuro <- rma.mv(
+  yi, vi, 
+  random = list(~ 1|outcome_id, ~1|exp_id),
+  method = "REML",
+  data = neuro_df,
+  mods = ~ out_grouped:trauma_presence - 1,
+  slab = exp_id
+)
+
+# calculate I2
+W <- diag(1/neuro_df$vi)
+X <- model.matrix(mod_neuro)
+P <- W - W %*% X %*% solve(t(X) %*% W %*% X) %*% t(X) %*% W
+I2_neuro <- 100 * sum(mod_neuro$sigma2) / (sum(mod_neuro$sigma2) + (mod_neuro$k-mod_neuro$p)/sum(diag(P))) 
+
+# between and within cluster heterogeneity
+#100 * mod_morph$sigma2 / (sum(mod_morph$sigma2) + (mod_morph$k-mod$p)/sum(diag(P)))
+
+```
+
+The effects of ELA on neurogenesis were investigated in terms of proliferation, differentiation, and survival by investigating the differences in expression levels of ki67, dcx and brdu after short (<1  day, interpreted as proliferation) and long (> 1 day, interpreted as survival) induction time. Furthermore, we investigated whether the experience of other traumatic life events interacted with these outcomes. We focused on the dentate gyrus, and we therefore excluded 1 publication which analysed the whole hippocampus (Pubmed id = `r hip %>% filter(out_grouped %in% c("brdu_cells", "dcx", "ki67"), ba_main != "dentate_gyrus") %>% pull(id) %>% unique()`). Additionally, one publication (PMID = "27644094") was removed from the analysis because both its comparisons were evaluated as potential outliers and majorly impacted the results after by sensitivity analysis.
+
+In our 3-level model, the moderators explained a significant portion of the variance (Q~m~(`r mod_neuro$QMdf[1]`)=`r mod_neuro$QM`, *p*=`r mod_neuro$QMp`). However, there were still unexplained heterogeneity in the model (Q~h~(27)=`r mod_neuro$QE`, *p*=`r mod_neuro$QEp`), suggesting that additional moderators may be relevant to explain the effects. This will be later assessed with the exploratory moderator analysis. 
+
+
+```{r neurogenesis tests, include=FALSE}
+interactions <- names(data.frame(mod_neuro$X))
+
+# contrasts organized in table
+
+neuro_contr <-   cbind(
+    sapply(c(neuro_outcomes[-1], "short", "long", "trauma_presenceno", "trauma_presenceyes"), function(x) 
+      ifelse(str_detect(interactions,x),
+             1/sum(str_detect(interactions,x)),
+             0
+             )
+      ),
+    
+      sapply("trauma_presenceyes", function(x) 
+        ifelse(str_detect(interactions,x),
+               1/sum(str_detect(interactions,x)),
+               -1/(length(interactions)-sum(str_detect(interactions,x)))
+               )
+    )
+    
+)
+
+
+neuro_contr <- neuro_contr %>% t() %>% as.matrix()
+
+# of note, trauma presence yes / no vs 0 has been added only for visualization purposes. The analysis as reported in the manuscript is without them
+neuro_res <- summary(multcomp::glht(mod_neuro, linfct = neuro_contr, df=df.residual(mod_neuro)), test=multcomp::adjusted('holm'))
+
+
+```
+
+Early life adversity decreased the expression of dcx (*g*(se) = `r neuro_res$test$coefficients["dcx"]`(`r neuro_res$test$sigma["dcx"]`), t = `r neuro_res$test$tstat["dcx"]`, *p* = `r neuro_res$test$pvalues["dcx"]`), and brdu both with short (*g*(se) = `r neuro_res$test$coefficients["short"]`(`r neuro_res$test$sigma["short"]`), t = `r neuro_res$test$tstat["short"]`, *p* = `r neuro_res$test$pvalues["short"]`) and long (*g*(se) = `r neuro_res$test$coefficients["long"]`(`r neuro_res$test$sigma["long"]`), t = `r neuro_res$test$tstat["long"]`, *p* = `r neuro_res$test$pvalues["long"]`) time since induction. Conversely, ki67 expression was uneffected (*g*(se) = `r neuro_res$test$coefficients["ki67"]`(`r neuro_res$test$sigma["ki67"]`), t = `r neuro_res$test$tstat["ki67"]`, *p* = `r neuro_res$test$pvalues["ki67"]`). Overall the results were comparable both for groups that experienced and not other traumatic life events (*g*(se) = `r neuro_res$test$coefficients["trauma_presenceyes"]`(`r neuro_res$test$sigma["trauma_presenceyes"]`), t = `r neuro_res$test$tstat["trauma_presenceyes"]`, *p* = `r neuro_res$test$pvalues["trauma_presenceyes"]`). All results are shown in Figure 4 (for the paper I will show only the results on the significant analyses).
+
+
+
+```{r neurogenesis results barplot, fig.width=10, fig.height=8}
+neuro_res_df <- data.frame(
+  comparison = c("BrdU long", "BrdU short","DCX", "Ki67"),
+  g = neuro_res$test$coefficients[c("long", "short","dcx", "ki67")], 
+  se = neuro_res$test$sigma[c("long", "short","dcx", "ki67")], 
+  t = neuro_res$test$tstat[c("long", "short","dcx", "ki67")], 
+  pval = neuro_res$test$pvalues[c("long", "short","dcx", "ki67")],
+  n_comp = neuro_df %>% group_by(out_grouped) %>% count() %>% pull(n),
+  n_id = neuro_df %>% group_by(out_grouped) %>% summarize(n = length(unique(id))) %>% pull(n)
+) %>% 
+  mutate(
+   lab_sig = case_when(
+    pval < .001 ~ "***", 
+    pval < .01 ~ "**", 
+    pval < .05 ~ "*", 
+    T ~ ""
+  )
+  )
+
+
+g_neuro <- neuro_res_df %>%
+  mutate(comparison = as.factor(comparison), 
+         comparison = factor(comparison, levels = c("DCX", "BrdU long", "BrdU short", "Ki67"))) %>%
+  ggplot(aes(comparison, g)) + 
+  geom_hline(yintercept = 0, color = "black") + 
+  geom_bar(stat = "identity", colour = "black", fill = "white") + 
+  geom_errorbar(aes(ymin = g-se, ymax = g+se), width = 0.2) +
+  
+  geom_text(aes(label = lab_sig, y = g-se-0.1, size = 2)) +
+  geom_text(aes(label = paste0("study = ", n_id), y = -1.9)) +
+  geom_text(aes(label = paste0("comp = ", n_comp), y = -2)) +
+
+  # beautiful
+  my_theme + 
+  labs(x="", y = "Hedge's g") + 
+  theme(text = element_text(size = 20), 
+       # axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+        legend.position = "none")
+
+## hit neuro 
+neuro_res_df <- data.frame(
+  comparison = c("trauma_presenceyes", "trauma_presenceno"),
+  g = neuro_res$test$coefficients[c("trauma_presenceyes", "trauma_presenceno")], 
+  se = neuro_res$test$sigma[c("trauma_presenceyes", "trauma_presenceno")], 
+  t = neuro_res$test$tstat[c("trauma_presenceyes", "trauma_presenceno")], 
+  pval = neuro_res$test$pvalues[c("trauma_presenceyes", "trauma_presenceno")],
+  n_comp = neuro_df %>% group_by(trauma_presence) %>% count() %>% arrange(desc(trauma_presence)) %>% pull(n),
+  n_id = neuro_df %>% group_by(trauma_presence) %>% summarize(n = length(unique(id))) %>% arrange(desc(trauma_presence)) %>% pull(n)
+) %>% 
+  mutate(
+   lab_sig = case_when(
+    pval < .001 ~ "***", 
+    pval < .01 ~ "**", 
+    pval < .05 ~ "*", 
+    T ~ ""
+  )
+  )
+
+g_neuro_hit <- neuro_res_df %>%
+  mutate(
+    comparison = ifelse(comparison == "trauma_presenceno", "no other \nhits", "other \nhits"), 
+    comparison = factor(comparison, levels = c("no other \nhits", "other \nhits"))
+  ) %>%
+  ggplot(aes(comparison, g)) + 
+  geom_hline(yintercept = 0, color = "black") + 
+  geom_bar(stat = "identity", colour = "black", fill = "white") + 
+  geom_errorbar(aes(ymin = g-se, ymax = g+se), width = 0.2) +
+  geom_text(aes(label = lab_sig, y = g-se-0.1, size = 2)) +
+  geom_text(aes(label = paste0("study = ", n_id), y = -2.1)) +
+  geom_text(aes(label = paste0("comp = ", n_comp), y = -2.2)) +
+  geom_segment(aes(x = "no other \nhits", y = 0.2, xend = "other \nhits", yend = 0.2)) + 
+  geom_text(aes(x = 1.5, y = 0.3, label = "ns", size = 2)) + 
+  # beautiful
+ # ylim(c(-0.2,0.8)) + 
+  my_theme + 
+  labs(x="", y = "Hedge's g") + 
+  theme(text = element_text(size = 20), 
+       # axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+        legend.position = "none")
+
+fig_neuro <- ggpubr::ggarrange(
+  g_neuro, 
+  g_neuro_hit,
+  labels = c("A", "B")
+)
+
+ggsave(fig_neuro, filename = c("results/fig_4.eps"), width = 14, height = 5)
+```
+
+
+### Analysis of bdnf
+
+```{r bdnf data}
+bdnf_df <- hip %>% 
+  filter(out_grouped == "bdnf")
+
+bdnf_out_summ <- bdnf_df %>% 
+  group_by(ba_main) %>% 
+  summarize(
+    n_comp = length(ba_main), 
+    per = (n_comp / nrow(.)) * 100
+  )
+
+bdnf_ba_mod <- rma.mv(yi, vi, 
+  random = ~ 1|id,
+  method = "REML",
+  data = hip %>% filter(out_grouped == "bdnf"),
+  mods = ~ ba_main - 1,
+  slab = exp_id
+  )
+```
+
+Potential moderators of ELA on BDNF expression were the type of outcome investigated (RNA or protein), the (sub) the experience of other stressful life experiences, and the state of the animals at death (rest or aroused/stressed). The latter is relevant only for RNA outcomes because for most studies there was a short interval between the induction of the arousal/stress state and the decapitation. Sub-parts of the hippocampus was not included in the final model because it did not explain a significant portion of the variance in the univariate model (Q~m~(`r bdnf_ba_mod$QMdf[1]`)=`r bdnf_ba_mod$QM`, *p*=`r bdnf_ba_mod$QMp`).Furthermore, sub-brain areas are unlikely to interact with other moderators because the majority of observations were measured in the whole hippocampus (`r bdnf_out_summ[bdnf_out_summ$ba_main == "hippocampus_total",]$per`% of bdnf comparisons).
+
+```{r bdnf model, include=FALSE}
+
+bdnf_df <- bdnf_df %>% 
+  mutate(at_death = ifelse(at_death == "rest", "rest", "not_rest"))
+
+mod_bdnf <- rma.mv(
+  yi, vi, 
+  random = list(~1|outcome_id, ~1|exp_id),
+  method = "REML",
+  data = bdnf_df,
+  mods = ~ trauma_presence:product_measured:at_death - 1,
+  slab = exp_id
+)
+
+
+# calculate I2
+W <- diag(1/hip[hip$out_grouped == "bdnf",]$vi)
+X <- model.matrix(mod_bdnf)
+P <- W - W %*% X %*% solve(t(X) %*% W %*% X) %*% t(X) %*% W
+I2_bdnf <- 100 * sum(mod_bdnf$sigma2) / (sum(mod_bdnf$sigma2) + 
+                                           (mod_bdnf$k-mod_bdnf$p)/sum(diag(P))) 
+
+# between and within cluster heterogeneity
+#100 * mod_morph$sigma2 / (sum(mod_morph$sigma2) + (mod_morph$k-mod$p)/sum(diag(P)))
+
+```
+
+Moderator analysis BDNF: Q~m~(`r mod_bdnf$QMdf[1]`)=`r mod_bdnf$QM`, *p*=`r mod_bdnf$QMp`)
+Heterogeneity BDNF: Q~h~(25)=`r mod_bdnf$QE`, *p*=`r mod_bdnf$QEp`, I^2^ = `r I2_bdnf`) 
+
+```{r bdnf visualization, include=FALSE}
+interactions <- names(data.frame(mod_bdnf$X))
+
+# contrasts organized in table
+
+bdnf_contr <-   cbind(
+  
+  # protein vs 0, rna vs 0
+    sapply(c("protein", "rna"), function(x) 
+      ifelse(str_detect(interactions,x),
+             1/sum(str_detect(interactions,x)),
+             0
+             )
+      ),
+    
+  # not rest vs 
+        sapply(c("not_rest"), function(x)
+      ifelse(str_detect(interactions, "protein"), 0,
+        ifelse(str_detect(interactions, x),
+               1/sum(str_detect(interactions,x)), 
+               -1/(length(interactions)-
+                     sum(str_detect(interactions[!str_detect(interactions,"proteins")],x)))
+               ))
+    ),
+  sapply("trauma_presenceyes", function(x) 
+        ifelse(str_detect(interactions,x),
+               1/sum(str_detect(interactions,x)),
+               -1/(length(interactions)-sum(str_detect(interactions,x)))
+               )
+    ),
+    sapply(c("at_deathnot_rest", "at_deathrest"), function(x)
+      ifelse(str_detect(interactions, "protein"), 0,
+        ifelse(str_detect(interactions, x),
+              1/sum(str_detect(interactions[!str_detect(interactions,"protein")],x)), 0))), 
+  rep(1/length(interactions), length(interactions))
+)
+
+
+bdnf_contr <-bdnf_contr %>% t() %>% as.matrix()
+
+bdnf_res <- summary(multcomp::glht(mod_bdnf, linfct = bdnf_contr, df=df.residual(mod_bdnf)), test=multcomp::adjusted('holm'))
+
+bdnf_trauma_mod <- rma.mv(
+  abs(yi), vi, 
+  random = ~ 1|id,
+  method = "REML",
+  data = bdnf_df,
+  mods = ~ trauma_presence:product_measured:at_death - 1,
+  slab = exp_id
+)
+
+## baseline & acute stress
+df_g_bdnf <- data.frame(
+  g = mod_bdnf$beta, 
+  se = mod_bdnf$se,
+  pval = mod_bdnf$pval
+) %>% 
+  mutate(
+    trauma_presence = str_remove_all(rownames(.), "trauma_presence") %>% str_remove_all("\\:.*"),
+    product_measured = str_remove_all(rownames(.), ".*product_measured") %>% str_remove_all("\\:.*"),
+    at_death = str_remove_all(rownames(.), ".*at_death")
+  ) %>% 
+  
+  left_join(bdnf_df %>% group_by(trauma_presence, product_measured, at_death) %>% summarise(n_comp = length(id), n_id = length(unique(id)))) %>%
+    mutate(
+   lab_sig = case_when(
+    pval < .001 ~ "***", 
+    pval < .01 ~ "**", 
+    pval < .05 ~ "*", 
+    T ~ ""
+  )
+  )
+
+g_bdnf <- df_g_bdnf %>%
+  mutate(trauma_presence = ifelse(trauma_presence == "yes", 
+                                  "other \nhits", "no other \nhits")) %>%
+  ggplot(aes(trauma_presence, g, fill = trauma_presence)) + 
+  geom_hline(yintercept = 0, color = "black") + 
+  geom_bar(stat = "identity", colour = "black") + 
+  geom_errorbar(aes(ymin = g-se, ymax = g+se), width = 0.2) +
+  
+  # beautiful
+ # ylim(c(-0.2,0.8)) + 
+  my_theme + 
+  labs(x="", 
+       y = "Hedge's g", 
+       fill = ""
+    ) + 
+  facet_grid(str_replace_all(at_death, "_", " ")~str_replace_all(product_measured, "_", " ")) + 
+  geom_text(aes(label = lab_sig, y = g-se-0.2), size = 2) +
+  geom_text(aes(label = paste0("study = ", n_id), y = -1.5)) +
+  geom_text(aes(label = paste0("comp = ", n_comp), y = -1.7)) +
+  scale_fill_manual(values = c("white", "grey")) + 
+  # geom_text(x = "Baseline", y = max(df_fig_main$g) + 0.2, label = "*", size = 20) + 
+  # geom_text(aes(y = 0.05, label = paste("n = ", n), size = 20)) + 
+  theme(text = element_text(size = 20), 
+    #    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+        legend.position = "bottom")
+
+g_bdnf
+ggsave(g_bdnf, filename = "results/suppl_fig_2.eps", width = 6, height = 6)
+
+```
+
+
+```{r bdnf subgroup analysis, fig.width=10, fig.height=8, echo=FALSE, warning=FALSE}
+bdnf_df_sub <- bdnf_df %>% 
+  filter(product_measured == "rna",
+         at_death == "not_rest")
+
+res1 <- rma.mv(
+  yi, vi, 
+  random = ~ 1|id,
+  method = "REML",
+  data = bdnf_df,
+  subset=trauma_presence=="yes",
+  slab = exp_id
+)
+res2 <- rma.mv(
+  yi, vi, 
+  random = ~ 1|id,
+  method = "REML",
+  data = bdnf_df,
+  subset=trauma_presence=="no",
+  slab = exp_id
+)
+
+dat.comp <- data.frame(estimate = c(coef(res1), coef(res2)), stderror = c(res1$se, res2$se),
+                       meta = c("trauma_yes","trauma_no"), tau2 = round(c(res1$tau2, res2$tau2),3))
+
+bdnf_sub_res <- rma(estimate, sei=stderror, mods = ~ meta, method="FE", data=dat.comp, digits=3)
+
+```
+
+Lastly, we conducted a subgroup analysis to test whether the effects of ELA on BDNF rna expression levels at rest were different between animals with and without other traumatic life experiences. Although animals that also experienced other traumatic life events have overall lower effect sizes (), the difference between the subgroups was not significant (*g*(se) = `r bdnf_sub_res$b[2]`(`r bdnf_sub_res$se[[2]]`), z = `r bdnf_sub_res$zval[[2]]`, *p* = `r bdnf_sub_res$pval[[2]]`).
+
+
+
+## Exploratory analysis with metaforest
+The models on neurogenesis and bdnf had remaining unexplained variance. To explore potential moderators, we used metaforest, an application of random forests to meta-analysis data by means of bootstrap sampling. After a thresholded preselection, metaforest ranks moderators based on their influence on effect size. 
+
+### Exploratory analysis neurogenesis
+
+```{r metaforest neurogenesis, include=FALSE}
+vars_metaforest <- c("exp_id", "yi", "vi", 
+                     "species", "age", "model",
+                     "origin", "housing_after_weaning", "behavior",
+                     "outcome",
+                     "major_life_events", "at_death", "ba_main"
+                     )
+# Run model with many trees to check convergence
+neuro <- neuro_df %>% 
+  mutate(outcome = paste0(outcome, days_after_induction)) %>%
+  rename(age = age_testing_weeks) %>%
+  #select(all_of(vars_metaforest), "days_after_induction")%>% 
+  select(all_of(vars_metaforest))%>% 
+  mutate(exp_id = as.numeric(as.factor(exp_id)))
+
+# Convergence
+# check_conv <- MetaForest(yi~.,
+#                         data = neuro,
+#                         study = "exp_id",
+#                         whichweights = "random",
+#                         num.trees = 20000)
+# plot(check_conv)
+
+## model has converged in approx 5000 trees
+# Model with 5000 trees for replication
+set.seed(3540)
+mf_rep <- MetaForest(yi~.,
+                        data = neuro,
+                        study = "exp_id",
+                        whichweights = "random",
+                        num.trees = 5000)
+# Run recursive preselection, store results in object 'preselect'
+preselected <- preselect(mf_rep,
+                         replications = 100,
+                         algorithm = "recursive")
+# Plot the results
+#plot(preselected)
+
+# Retain only moderators with positive variable importance in more than
+# 50% of replications
+retain_mods <- preselect_vars(preselected, cutoff = 0.5)
+
+
+# Set up 10-fold grouped (=clustered) CV
+grouped_cv <- trainControl(method = "cv",
+                           index = groupKFold(neuro$exp_id, k = 10))
+
+# Set up a tuning grid for the three tuning parameters of MetaForest
+tuning_grid <- expand.grid(whichweights = c("random", "fixed", "unif"),
+                       mtry = 2:6, # initally 2 to 6, but only 4 mods available
+                       min.node.size = 2:6)
+
+# X should contain only retained moderators, clustering variable, and vi
+X <- neuro[, c("exp_id", "vi", retain_mods)]
+
+# Train the model
+mf_cv <- train(y = neuro$yi,
+               x = X,
+               study = "exp_id", # Name of the clustering variable
+               method = ModelInfo_mf(),
+               trControl = grouped_cv,
+               tuneGrid = tuning_grid,
+               num.trees = 5000)
+# Examine optimal tuning parameters
+rcv_neuro <- mf_cv$results[which.min(mf_cv$results$RMSE), ]
+
+
+# For convenience, extract final model
+final <- mf_cv$finalModel
+# Extract R^2_{oob} from the final model
+r2_oob_neuro <- final$forest$r.squared
+
+# Plot variable importance
+neuro_varimp <- VarImpPlot(final)
+
+# partial dependence plots will be ranked by importance
+ordered_vars <- names(final$forest$variable.importance)[
+  order(final$forest$variable.importance, decreasing = TRUE)]
+
+# Plot partial dependence
+partial_dep_neuro <- PartialDependence(final, vars = ordered_vars,
+                  rawdata = TRUE, pi = .95)
+```
+
+Metaforest neurogenesis: 
+  
+  - investigated variables: `r length(vars_metaforest)`
+  - number of retained moderators (positive var importance in at least 50% of replications) after 100 replications: `r length(retain_mods)`
+  - variance explained: R~oob~^2^(MSE) = `r r2_oob_neuro`(`r final$forest$prediction.error`, R~cv~^2^(SD) = `r rcv_neuro$Rsquared`(`r rcv_neuro$RsquaredSD`)
+
+
+```{r neuro metaforest graphs, fig.width=10, fig.height=12}
+ggpubr::ggarrange(
+  neuro_varimp,
+  plot(preselected), 
+  labels = c("a", "b"),
+  nrow = 2, heights = c(1,2)
+)
+```
+
+### Exploratory analysis bdnf
+
+```{r metaforest bdnf, include=FALSE}
+
+# Run model with many trees to check convergence
+bdnf <- bdnf_df %>% 
+  mutate(outcome = case_when(
+    str_detect(outcome, "_exon_") ~ "bdnf", 
+    T ~ outcome
+  ),
+  outcome = paste0(outcome, product_measured)) %>%
+  rename(age = age_testing_weeks) %>%
+  # select(all_of(vars_metaforest), "product_measured")%>%
+  select(all_of(vars_metaforest))%>%
+  mutate(exp_id = as.numeric(as.factor(exp_id)))
+
+# checking convergence
+check_conv <- MetaForest(yi~.,
+                        data = bdnf,
+                     #   study = "id",
+                        whichweights = "random",
+                        num.trees = 20000)
+# Plot convergence trajectory
+#plot(check_conv)
+
+## model has converged in approx 10000 trees
+# Model with 10000 trees for replication
+mf_rep <- MetaForest(yi~.,
+                        data = bdnf,
+                        study = "exp_id",
+                        whichweights = "random",
+                        num.trees = 10000)
+
+# Run recursive preselection, store results in object 'preselect'
+preselected <- preselect(mf_rep,
+                         replications = 100,
+                         algorithm = "recursive")
+# Plot the results
+#plot(preselected)
+
+# Retain only moderators with positive variable importance in more than
+# 50% of replications
+retain_mods <- preselect_vars(preselected, cutoff = .5)
+
+# Set up 10-fold grouped (=clustered) CV
+grouped_cv <- trainControl(method = "cv",
+                           index = groupKFold(bdnf$exp_id, k = 10))
+
+# Set up a tuning grid for the three tuning parameters of MetaForest
+tuning_grid <- expand.grid(whichweights = c("random", "fixed", "unif"),
+                       #     mtry = 2,
+                       # min.node.size = 2)
+                       mtry = 2:3,
+                       min.node.size = 2:3)
+
+# X should contain only retained moderators, clustering variable, and vi
+X <- bdnf[, c("exp_id", "vi", retain_mods)]
+if (length(retain_mods) == 0) {
+  retain_mods <- preselect_vars(preselected, cutoff = 0)
+  X <- bdnf[, c("exp_id", "vi", retain_mods)]
+}
+
+# Train the model
+mf_cv <- train(y = bdnf$yi,
+               x = X,
+               study = "exp_id", # Name of the clustering variable
+               method = ModelInfo_mf(),
+               trControl = grouped_cv,
+               tuneGrid = tuning_grid,
+               num.trees = 5000)
+
+# Examine optimal tuning parameters
+rcv_bdnf <- mf_cv$results[which.min(mf_cv$results$RMSE), ]
+
+# For convenience, extract final model
+final <- mf_cv$finalModel
+# Extract R^2_{oob} from the final model
+r2_oob_bdnf <- final$forest$r.squared
+# Plot convergence
+#plot(final)
+
+# Plot variable importance
+bdnf_varimp <- VarImpPlot(final)
+
+# Sort the variable names by importance, so that the
+# partial dependence plots will be ranked by importance
+ordered_vars_bdnf <- names(final$forest$variable.importance)[
+  order(final$forest$variable.importance, decreasing = TRUE)]
+
+
+# Plot partial dependence
+partial_dep_bdnf <- PartialDependence(final, vars = ordered_vars_bdnf,
+                  rawdata = TRUE, pi = .95)
+
+```
+
+
+Metaforest BDNF: 
+  
+  - investigated variables: `r length(vars_metaforest)`
+  - number of retained moderators (positive var importance in at least 50% of replications) after 100 replications: `r length(retain_mods)`
+  - variance explained: R~oob~^2^(MSE) = `r r2_oob_bdnf`(`r final$forest$prediction.error`, R~cv~^2^(SD) = `r rcv_bdnf$Rsquared`(`r rcv_bdnf$RsquaredSD`)
+
+
+```{r metaforest visualization}
+# figure 5
+ggpubr::ggarrange(
+  neuro_varimp,
+    bdnf_varimp, 
+  labels = c("A", "B"),
+  nrow = 1
+)
+
+```
+
+
+## Comparing males and females
+
+```{r sex}
+sex <- dat %>% 
+  
+  # keep papers with both sexes
+  filter(id %in% id_both_sex$id) %>% 
+  
+  # to wide format
+  mutate(n_tot = n_c + n_e) %>%
+  mutate(
+    out_grouped = case_when(
+      out_grouped == "brdu_cells" & days_after_induction <= 1 ~ "brdu_short",
+      out_grouped == "brdu_cells" & days_after_induction > 1 ~ "brdu_long",
+      T ~ out_grouped
+    )
+  ) %>%
+  select(c(life_vars[c(1:3, 5:9)], 
+           "out_grouped", "ba_grouped", "ba_main", "trauma_presence", "product_measured",
+           "n_tot", "yi", "vi")) %>%
+  pivot_wider(names_from = sex, values_from = c("n_tot", "yi", "vi")) %>% 
+  
+  # keep only exp with both sexes
+  filter(!is.na(yi_male), !(is.na(yi_female))) 
+
+
+```
+
+
+```{r sex graph, fig.width=10, fig.height=8}
+
+g_sex <- sex %>% 
+  mutate(out_grouped = str_replace_all(out_grouped, "brdu", "BrdU") %>%
+           str_replace_all("bdnf", "BDNF") %>% 
+           str_replace_all("ki67", "Ki67") %>%
+           str_replace_all("n_", "# ") %>% 
+           str_replace_all("_", " ")
+           
+  ) %>%
+  
+  ggplot(aes(abs(yi_female), abs(yi_male), color = out_grouped)) + 
+  geom_abline(intercept = 0, slope = 1, size = 0.5, linetype = "dashed") +
+  geom_point(size = 3) + 
+  labs(
+    x = "Effect size females",
+    y = "Effect size males", 
+    color = "Outcome"
+  ) + 
+  my_theme + 
+  theme(text = element_text(size = 20), 
+        legend.position = "bottom")
+  
+g_sex
+
+ggsave(g_sex, filename = "results/fig_7.eps", width = 12, height = 10) 
+
+```
+
+
+```{r sex diff}
+# I can perform a wald type test (normally used for moderator analysis) to test for sex differences
+# I will try to do it with the abs(yi), but it's still unclear to me what would happen to the meta-analysis
+
+sex_diff <- dat %>% 
+  # remove 25288769 because not paired males females 
+  filter(id != "25288769", 
+         id %in% id_both_sex$id)
+
+## perform two separate MA 
+res1 <- rma(abs(yi), vi, data=sex_diff, subset=sex=="male")
+res2 <- rma.mv(abs(yi), vi, data=sex_diff, subset=sex=="female")
+
+# put in same df
+dat.comp <- data.frame(
+  estimate = c(coef(res1), coef(res2)), 
+  stderror = c(res1$se, res2$se),
+  meta = c("male","female"), 
+  tau2 = round(c(res1$tau2, res2$tau2),3))
+
+# fixed effect model to compare the two 
+res_sex <- rma(estimate, sei=stderror, mods = ~ meta, method="FE", data=dat.comp, digits=3)
+```
+
+Wald test males vs females: (g(se) = `r res_sex$b[2]`(`r res_sex$se[2]`), z = `r res_sex$zval[2]`, p = `r res_sex$pval[2]`) in effect sizes, thereby suggesting that there is no overall difference between males and females on the effects of ELA on structural plasticity. Sex differences on specific outcomes and/or brain areas cannot however be excluded.
+
+
+## Bias assessment
+Risk of bias assessment .... *still to do*
+
+```{r eggers, include=FALSE}
+# morphology
+morph_df %>% 
+  ggplot(aes(yi, 1/vi, color = ba_main)) + 
+  geom_point() + 
+  my_theme
+
+
+
+mod_morph_taf <- rma(
+  yi, vi, 
+  method = "REML",
+  data = morph_df,
+  slab = exp_id
+)
+morph_funnel <- funnel(mod_morph_taf, yaxis = "seinv", 
+                       back = "gray55", 
+                       hline = "gray55",
+                   #    label = "out",
+                       # col=ifelse(morph_df$out_grouped == "length_dendrites", "red",
+                       #            ifelse(morph_df$out_grouped == "branching", "blue", "purple")),
+                       level=c(90, 95, 99), shade=c("white","gray75", "gray65"),
+                       legend = TRUE)
+
+
+# neurogenesis
+mod_neuro_taf <- rma(
+  yi, vi, 
+  method = "REML",
+  data = neuro_df,
+  slab = exp_id
+)
+neuro_funnel <- funnel(mod_neuro_taf, yaxis = "seinv", 
+                       back = "gray55", 
+                       hline = "gray55",
+                   #    label = "out",
+                       # col=ifelse(morph_df$out_grouped == "length_dendrites", "red",
+                       #            ifelse(morph_df$out_grouped == "branching", "blue", "purple")),
+                       level=c(90, 95, 99), shade=c("white","gray75", "gray65"),
+                       legend = TRUE)
+
+# bdnf
+mod_bdnf_taf <- rma(
+  yi, vi, 
+  method = "REML",
+  data = bdnf_df,
+  slab = exp_id
+)
+bdnf_funnel <- funnel(mod_bdnf_taf, yaxis = "seinv", 
+                       back = "gray55", 
+                       hline = "gray55",
+                   #    label = "out",
+                       # col=ifelse(morph_df$out_grouped == "length_dendrites", "red",
+                       #            ifelse(morph_df$out_grouped == "branching", "blue", "purple")),
+                       level=c(90, 95, 99), shade=c("white","gray75", "gray65"),
+                       legend = TRUE)
+
+
+```
+
+Due to software unavailability, publication bias was assessed on the univariate models without moderators. All outcomes displayed evidence of publication bias, as estimated with Egger's test (morphology: *z* = `r egg_morph$zval`, *p* = `r egg_morph$pval`; neurogenesis: *z* = `r egg_neuro$zval`, *p* = `r egg_neuro$pval`; bdnf = *z* = `r egg_bdnf$zval`, *p* = `r egg_bdnf$pval`) and by funnel plot inspection (Figure 9). This evaluation suggests that effect sizes may be overestimated in the morphology and neurogenesis models. For future studies, this should be considered when conducting power analyses. 
+
+```{r funnels, echo=FALSE}
+par(mfrow=c(2,2))
+  funnel(mod_morph_taf, yaxis = "seinv", back = "gray55", hline = "gray55",
+         level=c(90, 95, 99), shade=c("white","gray75", "gray65"))
+  title("A", adj = 0)
+  
+  funnel(mod_neuro_taf, yaxis = "seinv", back = "gray55", hline = "gray55",
+         level=c(90, 95, 99), shade=c("white","gray75", "gray65"))
+  title("B", adj = 0)
+  
+  funnel(mod_neuro_taf, yaxis = "seinv", back = "gray55", hline = "gray55",
+         level=c(90, 95, 99), shade=c("white","gray75", "gray65"))
+  title("C", adj = 0)
+  funnel(mod_neuro_taf, ylab = "", xlab="",pch=0, back = "white", col="white",
+         level=c(90, 95, 99), shade=c("white","gray75", "gray65"),legend=TRUE)
+  
+par(mfrow=c(1,1))
+```
+
+
+# Methods
+This review adhere's to SYRCLE's guidelines for protocol (De Vries 2015), search strategy (Leenaars et al., 2012), and risk of bias assessment (Hooijmans et al., 2014). Reporting is in accordance to the PRISMA reporting checklist (Moher et al., 2009, **Supplementary table 1**). The analytic strategy is based on earlier work of our own lab (cite dopamine, behavior, ieg meta-analyses). Materials, data, scripts used for this project are available via the open science framework (*link*)
+
+## Search strategy and data gathering
+To investigate the effects of ELA on structural plasticity, we conducted a systematic literature search on April 3^rd^ 2019 on the electronic databases PubMed and WebOfScience. The search string included the terms 'mice and rats' and 'postnatal ELA' (**Supplementary note 1**) and it was previously used by our own lab (cite IEG paper). ELA was defined as postnatal models that are based on an alteration of maternal care, either experimentally induced (maternal deprivation and separation, isolation, limited nesting and bedding), or naturally varying (licking and grooming). Study selection was performed in Rayyan by at least two (out of five) researchers. The order of the studies was different across researchers, and it occurred in two stages. In the first stage, titles and abstracts were excluded if: 1) were not a primary publication, 2) were not conducted in mice or rats, 3) did not concern early life adversity. During the second stage, full text was screened and studies were included if: 1) structural plasticity outcomes were measured, 2) the outcomes were measured in adulthood (older than week 8 but younger than 1 year), 3) the animals did not experience other pharmachological/dietary/genetic interventions, 4) the sex of animals was known (after contacting authors). Disagreements in study selection were resolved by involving an independent scientist. An overview of the study procedure is deligned in *Figure 1*.
+
+Data from eligible studies was organized in a standardized database, which is available via the open science framework (*link*). It includes details about 1) the publications (author, year, reference), 2) the experimental design (e.g. species, sex, model, other life events, age of the animals at the time of testing), 3) information about the outcome extracted (e.g. brain area, technique used), and 4) summary statistics of the data measured (e.g. sample size, mean or median, and deviation or interquantile range (iqr)). According to this structure, we organized the information of each individual comparison between a control and an experimental group. Of note, the groups always differed only in the experience of ELA. All other variables were constant between the control and ELA group. 
+
+If only SEM was reported, SD was calculated as SEM * n , where n = amount of animals per group. If median and iqr were reported rather than mean and SD, we evaluated whether median could be an approximation of the mean, i.e. the median was in the approximately in the center of the iqr range. If this condition was met (n~comp excluded~ = 2), the median was transformed to mean according to Hozo's (2005) formula: $$mean = (iqr_{low} + 2*median + iqr_{high}) / 4$$ ;
+$$sigma^{2} = \frac{1}{12}*(\frac{(iqr_{low} -2*median + iqr_{high})^2}{4} + (iqr_{high} - iqr_{low})^{2})$$. 
+
+If number of animals were reported as a range (e.g. 6–8 animals per group), we used the lower boundary of this number (e.g. 6 animals per group). Data that was reported exclusively in graphs was digitalized with Web Plot Digitalizer (ref). For all remaining missing information, we contacted the corresponding author of each manuscript (response rate XX). 
+
+## Data synthesis and statistical analysis
+Effect sizes for each individual comparison (i.e. the difference between control and ELA on each specific outcome) were calculated with *escalc* (R package *metafor*) as standardized mean difference with Hedge's g (*g*) method, which includes a correction factor for small sample sizes (Vesterinen et al., 2014).
+
+For the main analysis, we used a 3-level mixed effect model which accounts for the anticipated heterogeneity of the studies as well as the dependency of effects within experiments. In our experimental design, the 3 levels cor- respond to variance of effect size between 1) animals, 2) outcomes and 3) publications. Structural plasticity can be broadly classified in three functional aspects: morphology, neurogenesis and bdnf. Given their separate biological meaning, these were analyzed in separate models. Prior the beginning of the study, we defined potential moderators of the effects of ELA on structural plasticity, namely: 1) specific outcome, 2) brain areas, 3) experience of other traumatic events, 4) product measured (rna or protein, only for outcome bdnf), 5) state of the animal at death (only for bdnf and neurogenesis), 6) time since induction (only for brdu). The final moderators were selected based on the frequency of the available literature, to maximize interpretability and robustness of the results. Ultimately, only the hippocampus had sufficient observations for the meaningful quantitative analysis. The remaining brain areas were summarized only at a systematic review level. Table 4 summarizes the final models and considerations taken.
+
+```{r final models expl table 4}
+mod_explanation <- data.frame(
+  structural_plasticity = c("morphology", "neurogenesis", "bdnf"), 
+  final_model = c("Interaction between sub-part of the hippocampus and experience of other traumatic events",
+                  "Experience of other traumatic events. Sub-parts of hippocampus not applicable (only dentate gyrus included). Subgroup analysis for brdu with short induction and ki67 for interaction of state of the animals at death.", 
+                  "Interaction between other traumatic events, state of the animal at death and product measured. These moderators were selected because they explained a significant proportion of the variance in univariate models."), 
+  data_excluded = c("Complexity as a composite measure (n~paper~ = 1), spine density (n~paper~ = 3, n~comp~ = 6), number of dendrites (n~paper~ = 3, n~comp~ = 6)", 
+                    "Data not specific to the dentate gyrus (n~paper~ = 1)", ""), 
+  considerations = c("", 
+                     "Brdu with short (<1 day) vs long (> 1 day) induction time are considered two separate outcomes to decrease the number of moderators used.",
+                     "")
+)
+kable(mod_explanation, caption = "Table 4. Final models.")
+
+```
+
+For the state of the animal at death, aroused and stressed were combined in one single category (i.e. not rest) due to the availability of outcomes. If a study reported multiple sub-brain areas within one of our categorizations, these were combined for the quantitative synthesis to limit heterogeneity and avoid biasing paper-specific. Similarly, if a study reported multiple outcomes (e.g. multiple bdnf exons), these were combined into one measure. For volumes, this was achieved by adding together summary statistics. Given $X \sim N(µ_{x}, \sigma_{x}^{2})$ and $Y \sim N(µ_{y}, \sigma_{y}^{2})$, $Z = X + Y$. Then, $$Z \sim N(µ_{x} + µ_{y}, \sigma_{x}^{2} + \sigma_{y}^{2})$$.
+
+For all other outcomes, we calculated the mean and deviation of the average distributions ($Z \sim mean(X, Y)$), according to the formula: $$Z \sim N(mean(µ_{x}, µ_{y}), \frac{\sum_{x, y}\sigma^{2}}{n^{2}})$$.
+
+Heterogeneity was tested with Cochran Q-test (Moreira et al., 2016) and I^2^ statistics (Cheung, 2014). A significant test of heterogeneity means that there is still unexplained variance in the data, despite the used moderators. We therefore performed an exploratory analysis for those models (neurogenesis and bdnf) with significant unexplained heterogeneity. This was conducted using *MetaForest* (van Lissa, 2020), a novel exploratory approach to identify the most promising potential moderators. This method is an application of random forests to meta-analysis data by means of bootstrap sampling. MetaForest ranks moderators based on their (non)linear influence of the effect size. This analysis was conducted for neurogenesis and bdnf separately. We classified the experimental data in >30 variables, and selected 15 of these for metaforest analysis. After identifying a convergence range, we conducted a recursive preselection based on 100 replications, and selected only those moderators that were selected in at least 50% of the replications. With these variables, we built our MetaForest model and conducted a 10x cross validation to determine the optimal tuning parameters that minimized RMSE (*neurogenesis*: `r rcv_neuro$whichweights` weights, `r rcv_neuro$mtry` candidate moderators at each split, minimum node size =`r rcv_neuro$min.node.size`; *bdnf*: `r rcv_bdnf$whichweights` weights, `r rcv_bdnf$mtry` candidate moderators at each split, minimum node size =`r rcv_bdnf$min.node.size`). To estimate how much variance is explained by our model, we calculated the cross-validated R^2^ (R~cv~^2^), which is robust to overfitting and provides evidence for the results’ generalizability. 
+
+## Sex differences
+We planned to conduct our analyses for males and females separately, since the effects of stress have often been shown to differ across sexes. However, due to the limited number of publications in females, we only focused on males for quantitative analysis. Nonetheless, several publications performed experiments on both sexes. Although these publications were heterogeneous in the outcomes and brain areas investigated, we explored whether there was evidence of clear sex differences in the effects of ELA structural plasticity. At this purpose, we selected the subset of publications that performed experiments in both sexes, and calculated the effect sizes (Hedge's *g*) for males and females separately. Two identical models were built for the data subsets, one for each sex and without moderators due to the limited amount of evidence available. In these models, we used the absolute of the effect size since the different outcomes may have opposing effects thereby cancelling each others' out in the meta-analytic model. We then performed a Wald test to compare the female vs male models. With this test, we are effectively testing whether the effects of ELA on structural plasticity differ in males versus females, effectively testing for the strength of the effects. 
+
+## Bias assessment
+To assess risk of bias, we followed SYRCLE's risk of bias guidelines (*still to do*, Hooijmans et al., 2014). Publication bias was assessed by qualitative inspection of funnel plot asymmetry and quantification with Egger's regression (Egger et al., 1997). To the best of our knowledge no quantitative method is available for the inspection of publication bias for a multi-level setting. Despite this limitation, we performed a Trim and Fill analysis (Duval and Tweedie, 2000) on a univariate model without moderators for each of the functional outcomes (morphology, neurogenesis and bdnf). 
+
+
+## Software
+The analyses were conducted in R (version 3.5.1) (R Core Team, 2015), using the following packages: 1) metafor (Viechtbauer, 2010) for con- ducting the analysis, 2) metaforest (van Lissa, 2018b) for data ex- ploration, 3) shiny (Chang et al., 2017) to create MaBapp, and 4) dplyr (Wickham et al., 2018) for general data handling. For further specifi- cations about the analysis, the R script and the data are available (*link*).
