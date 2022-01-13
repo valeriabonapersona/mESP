@@ -2,9 +2,7 @@
 /bin
 
 # exclude data from source control by default
-/data/temp
-/data/processed
-/data/raw
+
 .Rproj.user
 
 
@@ -12,6 +10,10 @@
 .DS_Store
 .RData
 .Rhistory
+.csv
+.xlsx
+.RDS
+
 
 /docs/*
 /results/*
